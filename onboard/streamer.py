@@ -21,6 +21,7 @@ class VideoStreamer:
         self._last_send = 0
         # Listen for GCS registration packet
         self._reg_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self._reg_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._reg_sock.bind(('0.0.0.0', port))
         self._reg_sock.settimeout(0.01)
 

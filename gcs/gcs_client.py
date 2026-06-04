@@ -41,6 +41,7 @@ class GCSClient:
 
         # Video receive socket (bind before starting thread)
         self._vid_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self._vid_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._vid_sock.bind(('0.0.0.0', self.video_port + 100))
         self._vid_sock.settimeout(1.0)
 
