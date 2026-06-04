@@ -36,8 +36,8 @@ class TrackingSystem:
         cam_cfg = cfg['camera']
         cam_index = cam_cfg['index']
         self.cap = self._open_camera(cam_index, cam_cfg)
-        self.frame_w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        self.frame_h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        self.frame_w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or cam_cfg['width']
+        self.frame_h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or cam_cfg['height']
         logger.info(f"Camera opened: index={cam_index} resolution={self.frame_w}x{self.frame_h}")
 
         self.detector = ObjectDetector(cfg['detection'])
