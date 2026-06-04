@@ -11,6 +11,7 @@ RC_MID = 1500
 RC_MAX = 2000
 
 # ArduPlane mode numbers
+MODE_ACRO    = 1   # Acro — rate control, direct RC input, no attitude stabilization
 MODE_FBWA    = 5   # Fly By Wire A — stabilized, accepts RC input
 MODE_GUIDED  = 15
 
@@ -41,11 +42,11 @@ class MAVLinkInterface:
         )
 
     def set_fbwa_mode(self):
-        """Switch ArduPlane to FBWA (Fly By Wire A) mode."""
-        self._set_mode(MODE_FBWA)
+        """Switch ArduPlane to ACRO mode — rate control, direct RC sticks."""
+        self._set_mode(MODE_ACRO)
         time.sleep(0.5)
         mode = self._read_mode()
-        logger.info(f"Mode set → {mode} (target={MODE_FBWA} FBWA)")
+        logger.info(f"Mode set → {mode} (target={MODE_ACRO} ACRO)")
 
     def set_guided_mode(self):
         """Switch ArduPlane to GUIDED mode (kept for compatibility)."""
