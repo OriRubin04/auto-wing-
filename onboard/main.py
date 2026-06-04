@@ -35,17 +35,7 @@ class TrackingSystem:
 
         cam_cfg = cfg['camera']
         cam_index = cam_cfg['index']
-        # Use DirectShow backend on Windows — more reliable than default MSMF
-        self.cap = cv2.VideoCapture(cam_index, cv2.CAP_DSHOW)
-        if not self.cap.isOpened():
-            logger.warning("DirectShow failed, trying default backend")
-            self.cap = cv2.VideoCapture(cam_index)
-        if not self.cap.isOpened():
-            raise RuntimeError(f"Cannot open camera index {cam_index}. "
-                               "Check that no other app (Mission Planner, Teams, etc.) is using the webcam.")
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, cam_cfg['width'])
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, cam_cfg['height'])
-        self.cap.set(cv2.CAP_PROP_FPS, cam_cfg['fps'])
+        self.cap = self._open_camera(cam_index, cam_cfg)
         self.frame_w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         self.frame_h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         logger.info(f"Camera opened: index={cam_index} resolution={self.frame_w}x{self.frame_h}")
@@ -72,6 +62,32 @@ class TrackingSystem:
         logger.info("Ready. Waiting for GCS target selection.")
         self.running = True
         self._loop()
+
+    @staticmethod
+    def _open_camera(index, cam_cfg):
+        backends = [cv2.CAP_DSHOW, cv2.CAP_MSMF, cv2.CAP_ANY]
+        for backend in backends:
+            cap = cv2.VideoCapture(index, backend)
+            if not cap.isOpened():
+                cap.release()
+                continue
+            # Warm up — some drivers need a few frames before reporting correct resolution
+            for _ in range(5):
+                cap.read()
+                time.sleep(0.05)
+            ret, frame = cap.read()
+            if ret and frame is not None:
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, cam_cfg['width'])
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, cam_cfg['height'])
+                cap.set(cv2.CAP_PROP_FPS, cam_cfg['fps'])
+                logger.info(f"Camera backend: {backend}")
+                return cap
+            cap.release()
+        raise RuntimeError(
+            f"Cannot read from camera index {index}.\n"
+            "Make sure no other app is using the webcam (Mission Planner, Teams, Zoom, browser).\n"
+            "Try running: python tools\\camera_test.py"
+        )
 
     def _loop(self):
         last_update = time.time()
