@@ -36,11 +36,11 @@ detection:
 
 streaming:
   host: "0.0.0.0"
-  port: 14550
+  port: 15000
   quality: 70  # JPEG quality 0-100
   fps_limit: 25
 
 gcs:
   onboard_ip: "127.0.0.1"  # change to Pi IP on real hardware
-  video_port: 14550
-  control_port: 14551
+  video_port: 15000
+  control_port: 15001
