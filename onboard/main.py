@@ -91,12 +91,26 @@ class TrackingSystem:
 
     def _loop(self):
         last_update = time.time()
+        cam_fail_count = 0
         while self.running:
             ret, frame = self.cap.read()
             if not ret:
-                logger.warning("Camera frame read failed")
-                time.sleep(0.05)
+                cam_fail_count += 1
+                if cam_fail_count % 20 == 1:
+                    logger.warning(f"Camera read failed ({cam_fail_count}x) — reopening...")
+                    self.cap.release()
+                    time.sleep(1.0)
+                    try:
+                        self.cap = self._open_camera(
+                            self.cfg['camera']['index'], self.cfg['camera'])
+                        cam_fail_count = 0
+                        logger.info("Camera reopened successfully")
+                    except RuntimeError as e:
+                        logger.error(str(e))
+                else:
+                    time.sleep(0.05)
                 continue
+            cam_fail_count = 0
 
             # Check for GCS registration & stream frame
             self.streamer.check_registration()
