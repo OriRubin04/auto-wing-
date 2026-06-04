@@ -1,0 +1,46 @@
+camera:
+  index: 0
+  width: 640
+  height: 480
+  fps: 30
+
+mavlink:
+  connection_string: "tcp:127.0.0.1:5760"  # SITL default
+  baudrate: 115200
+  heartbeat_timeout: 10
+  takeoff_altitude: 50  # meters
+
+control:
+  # PID for roll (x-axis error)
+  roll_pid:
+    kp: 0.4
+    ki: 0.01
+    kd: 0.05
+    output_limit: 0.5  # max roll in radians (~28 deg)
+  # PID for pitch (y-axis error)
+  pitch_pid:
+    kp: 0.2
+    ki: 0.005
+    kd: 0.02
+    output_limit: 0.3  # max pitch in radians (~17 deg)
+  throttle: 0.6  # constant throttle 0-1
+  update_rate_hz: 20
+
+detection:
+  model: "yolov8n.pt"
+  confidence: 0.4
+  iou: 0.45
+  device: "cpu"  # "cuda" for Jetson
+  fallback_tracker: "CSRT"  # OpenCV tracker type
+  max_detection_failures: 10  # frames before fallback
+
+streaming:
+  host: "0.0.0.0"
+  port: 5000
+  quality: 70  # JPEG quality 0-100
+  fps_limit: 25
+
+gcs:
+  onboard_ip: "127.0.0.1"  # change to Pi IP on real hardware
+  video_port: 5000
+  control_port: 5001
