@@ -34,12 +34,21 @@ class TrackingSystem:
         self.tracking = False
 
         cam_cfg = cfg['camera']
-        self.cap = cv2.VideoCapture(cam_cfg['index'])
+        cam_index = cam_cfg['index']
+        # Use DirectShow backend on Windows — more reliable than default MSMF
+        self.cap = cv2.VideoCapture(cam_index, cv2.CAP_DSHOW)
+        if not self.cap.isOpened():
+            logger.warning("DirectShow failed, trying default backend")
+            self.cap = cv2.VideoCapture(cam_index)
+        if not self.cap.isOpened():
+            raise RuntimeError(f"Cannot open camera index {cam_index}. "
+                               "Check that no other app (Mission Planner, Teams, etc.) is using the webcam.")
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, cam_cfg['width'])
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, cam_cfg['height'])
         self.cap.set(cv2.CAP_PROP_FPS, cam_cfg['fps'])
-        self.frame_w = cam_cfg['width']
-        self.frame_h = cam_cfg['height']
+        self.frame_w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        self.frame_h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        logger.info(f"Camera opened: index={cam_index} resolution={self.frame_w}x{self.frame_h}")
 
         self.detector = ObjectDetector(cfg['detection'])
         self.controller = TrackingController(cfg['control'])
