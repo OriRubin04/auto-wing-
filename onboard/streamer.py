@@ -30,8 +30,10 @@ class VideoStreamer:
         try:
             data, addr = self._reg_sock.recvfrom(64)
             if data == b'REGISTER':
-                self._gcs_addr = (addr[0], self.port + 100)  # send stream to port+100
-                logger.info(f"GCS registered from {addr[0]}")
+                new_addr = (addr[0], self.port + 100)
+                if new_addr != self._gcs_addr:
+                    self._gcs_addr = new_addr
+                    logger.info(f"GCS registered from {addr[0]}")
         except socket.timeout:
             pass
 
