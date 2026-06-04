@@ -158,12 +158,28 @@ class ObjectDetector:
             return None
 
     def _init_cv_tracker(self, frame, bbox):
-        try:
-            self._cv_tracker = cv2.TrackerCSRT_create()
-            self._cv_tracker.init(frame, bbox)
-        except Exception as e:
-            logger.error(f"Failed to init CSRT tracker: {e}")
-            self._cv_tracker = None
+        # Try tracker APIs in order — newer OpenCV moved them to cv2.legacy
+        factories = []
+        tracker_type = self._tracker_type
+        for ns in [cv2, getattr(cv2, 'legacy', None)]:
+            if ns is None:
+                continue
+            for name in [f'Tracker{tracker_type}_create',
+                         'TrackerCSRT_create', 'TrackerKCF_create', 'TrackerMOSSE_create']:
+                fn = getattr(ns, name, None)
+                if fn:
+                    factories.append(fn)
+        for factory in factories:
+            try:
+                t = factory()
+                t.init(frame, bbox)
+                self._cv_tracker = t
+                logger.info(f"Tracker initialized: {factory.__name__}")
+                return
+            except Exception:
+                continue
+        logger.error("No working OpenCV tracker found")
+        self._cv_tracker = None
 
     @staticmethod
     def _bbox_center(bbox):

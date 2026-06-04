@@ -159,7 +159,11 @@ class TrackingSystem:
         error_y = (cy - self.frame_h / 2) / (self.frame_h / 2)
         roll, pitch, throttle = self.controller.compute(error_x, error_y)
         self.mav.send_attitude_target(roll, pitch, throttle=throttle)
-        logger.debug(f"err=({error_x:.2f},{error_y:.2f}) roll={roll:.3f} pitch={pitch:.3f}")
+        import math
+        logger.info(
+            f"CMD  err_x={error_x:+.2f} err_y={error_y:+.2f} | "
+            f"roll={math.degrees(roll):+.1f}deg  pitch={math.degrees(pitch):+.1f}deg  thr={throttle:.2f}"
+        )
 
     def _draw_hud(self, frame, target, state):
         h, w = frame.shape[:2]

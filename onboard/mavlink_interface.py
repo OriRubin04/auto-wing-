@@ -23,9 +23,27 @@ class MAVLinkInterface:
 
     def set_guided_mode(self):
         """Switch ArduPlane to GUIDED mode."""
-        self.mav.set_mode_apm(15)  # GUIDED = 15 for ArduPlane
-        time.sleep(0.5)
-        logger.info("Mode set to GUIDED")
+        # Try both methods — set_mode_apm works on some builds, command_long on others
+        self.mav.mav.command_long_send(
+            self.mav.target_system,
+            self.mav.target_component,
+            mavutil.mavlink.MAV_CMD_DO_SET_MODE,
+            0,
+            mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
+            15,  # GUIDED for ArduPlane
+            0, 0, 0, 0, 0
+        )
+        time.sleep(0.3)
+        self.mav.set_mode_apm(15)
+        time.sleep(0.3)
+        # Verify
+        msg = self.mav.recv_match(type='HEARTBEAT', blocking=True, timeout=3)
+        if msg:
+            mode = msg.custom_mode
+            logger.info(f"Mode after set: {mode} (15=GUIDED)")
+        else:
+            logger.warning("Could not verify mode change")
+        logger.info("GUIDED mode command sent")
 
     def arm(self):
         self.mav.arducopter_arm()
