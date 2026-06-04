@@ -5,7 +5,7 @@ camera:
   fps: 30
 
 mavlink:
-  connection_string: "tcp:127.0.0.1:5760"  # SITL default
+  connection_string: "udp:0.0.0.0:14550"  # SITL UDP broadcast — independent from Mission Planner
   baudrate: 115200
   heartbeat_timeout: 10
   takeoff_altitude: 50  # meters

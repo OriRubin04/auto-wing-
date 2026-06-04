@@ -5,100 +5,115 @@ from pymavlink import mavutil
 
 logger = logging.getLogger(__name__)
 
+# RC channel PWM range
+RC_MIN = 1000
+RC_MID = 1500
+RC_MAX = 2000
+
+# ArduPlane mode numbers
+MODE_FBWA    = 5   # Fly By Wire A — stabilized, accepts RC input
+MODE_GUIDED  = 15
+
 
 class MAVLinkInterface:
-    """Wraps pymavlink for ArduPlane GUIDED mode attitude control."""
+    """
+    pymavlink wrapper using RC_CHANNELS_OVERRIDE in FBWA mode.
+
+    Why RC override instead of SET_ATTITUDE_TARGET:
+    - Works reliably with any ArduPilot build / SITL
+    - FBWA keeps the plane stable; we just push virtual sticks
+    - SET_ATTITUDE_TARGET on ArduPlane requires specific GUIDED sub-modes
+      that vary by firmware version and often silently do nothing
+    """
 
     def __init__(self, connection_string, baudrate=115200):
         self.conn_str = connection_string
         self.baudrate = baudrate
         self.mav = None
-        self._last_heartbeat = 0
 
     def connect(self, timeout=30):
         logger.info(f"Connecting to {self.conn_str}")
         self.mav = mavutil.mavlink_connection(self.conn_str, baud=self.baudrate)
         self.mav.wait_heartbeat(timeout=timeout)
-        logger.info(f"Heartbeat received from sysid={self.mav.target_system}")
+        logger.info(
+            f"Heartbeat from sysid={self.mav.target_system} "
+            f"compid={self.mav.target_component}"
+        )
+
+    def set_fbwa_mode(self):
+        """Switch ArduPlane to FBWA (Fly By Wire A) mode."""
+        self._set_mode(MODE_FBWA)
+        time.sleep(0.5)
+        mode = self._read_mode()
+        logger.info(f"Mode set → {mode} (target={MODE_FBWA} FBWA)")
 
     def set_guided_mode(self):
-        """Switch ArduPlane to GUIDED mode."""
-        # Try both methods — set_mode_apm works on some builds, command_long on others
+        """Switch ArduPlane to GUIDED mode (kept for compatibility)."""
+        self._set_mode(MODE_GUIDED)
+        time.sleep(0.5)
+        logger.info("GUIDED mode command sent")
+
+    def _set_mode(self, mode_num):
         self.mav.mav.command_long_send(
             self.mav.target_system,
             self.mav.target_component,
             mavutil.mavlink.MAV_CMD_DO_SET_MODE,
             0,
             mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
-            15,  # GUIDED for ArduPlane
+            mode_num,
             0, 0, 0, 0, 0
         )
-        time.sleep(0.3)
-        self.mav.set_mode_apm(15)
-        time.sleep(0.3)
-        # Verify
+
+    def _read_mode(self):
         msg = self.mav.recv_match(type='HEARTBEAT', blocking=True, timeout=3)
-        if msg:
-            mode = msg.custom_mode
-            logger.info(f"Mode after set: {mode} (15=GUIDED)")
-        else:
-            logger.warning("Could not verify mode change")
-        logger.info("GUIDED mode command sent")
+        return msg.custom_mode if msg else '?'
 
     def arm(self):
-        self.mav.arducopter_arm()
-        logger.info("Arm command sent")
-
-    def takeoff(self, altitude_m):
-        """Command takeoff to altitude in meters (MSL)."""
         self.mav.mav.command_long_send(
             self.mav.target_system,
             self.mav.target_component,
-            mavutil.mavlink.MAV_CMD_NAV_TAKEOFF,
-            0,
-            0, 0, 0, 0, 0, 0, altitude_m
+            mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+            0, 1, 0, 0, 0, 0, 0, 0
         )
-        logger.info(f"Takeoff command sent: {altitude_m}m")
+        logger.info("Arm command sent")
 
-    def send_attitude_target(self, roll_rad, pitch_rad, yaw_rate_rad=0.0, throttle=0.6):
+    def send_rc_override(self, roll_norm, pitch_norm, throttle_norm=0.6, yaw_norm=0.0):
         """
-        Send SET_ATTITUDE_TARGET to control roll/pitch directly.
-        type_mask: ignore yaw rate = 0b00000100 = 4, ignore everything except roll/pitch/throttle
-        We command roll+pitch+thrust, ignore yaw (bit 2) and body rates (bits 0,1,2).
-        type_mask bits: 0=rollrate, 1=pitchrate, 2=yawrate, 6=throttle
-        To use roll/pitch angles + throttle: ignore rates (bits 0,1,2) = 0b00000111 = 7
+        Send RC_CHANNELS_OVERRIDE — simulates stick movement.
+
+        Args:
+            roll_norm:     -1.0 (full left) to +1.0 (full right)
+            pitch_norm:    -1.0 (full down) to +1.0 (full up)
+            throttle_norm:  0.0 to 1.0
+            yaw_norm:      -1.0 (full left) to +1.0 (full right)
+
+        ArduPlane channel mapping (Mode 2):
+            CH1 = Roll (aileron)
+            CH2 = Pitch (elevator)   NOTE: 1000=up, 2000=down on most setups
+            CH3 = Throttle
+            CH4 = Yaw (rudder)
         """
-        # Quaternion from roll/pitch (yaw=0 relative)
-        q = self._euler_to_quat(roll_rad, pitch_rad, 0.0)
+        ch1 = self._norm_to_pwm(roll_norm)
+        ch2 = self._norm_to_pwm(-pitch_norm)   # invert: positive pitch = nose up = lower PWM
+        ch3 = int(RC_MIN + throttle_norm * (RC_MAX - RC_MIN))
+        ch4 = self._norm_to_pwm(yaw_norm)
 
-        # type_mask: bit set = ignore. We send attitude+throttle, ignore body rates.
-        type_mask = 0b00000111  # ignore roll/pitch/yaw RATES, use attitude + throttle
-
-        self.mav.mav.set_attitude_target_send(
-            int(time.time() * 1000) & 0xFFFFFFFF,  # time_boot_ms
+        # Channels 5-8: 0 = do not override
+        self.mav.mav.rc_channels_override_send(
             self.mav.target_system,
             self.mav.target_component,
-            type_mask,
-            q,              # quaternion [w, x, y, z]
-            0.0,            # roll rate (ignored)
-            0.0,            # pitch rate (ignored)
-            yaw_rate_rad,   # yaw rate
-            throttle        # 0-1
+            ch1, ch2, ch3, ch4,
+            0, 0, 0, 0
         )
 
-    def send_velocity_ned(self, vx, vy, vz):
-        """Alternative: send velocity in NED frame (m/s)."""
-        self.mav.mav.set_position_target_local_ned_send(
-            int(time.time() * 1000) & 0xFFFFFFFF,
+    def release_rc_override(self):
+        """Release all RC overrides — hand control back to pilot."""
+        self.mav.mav.rc_channels_override_send(
             self.mav.target_system,
             self.mav.target_component,
-            mavutil.mavlink.MAV_FRAME_BODY_NED,
-            0b0000111111000111,  # velocity only
-            0, 0, 0,
-            vx, vy, vz,
-            0, 0, 0,
-            0, 0
+            0, 0, 0, 0, 0, 0, 0, 0
         )
+        logger.info("RC override released")
 
     def get_attitude(self):
         msg = self.mav.recv_match(type='ATTITUDE', blocking=False)
@@ -108,15 +123,14 @@ class MAVLinkInterface:
 
     def close(self):
         if self.mav:
+            try:
+                self.release_rc_override()
+            except Exception:
+                pass
             self.mav.close()
 
     @staticmethod
-    def _euler_to_quat(roll, pitch, yaw):
-        cr, sr = math.cos(roll / 2), math.sin(roll / 2)
-        cp, sp = math.cos(pitch / 2), math.sin(pitch / 2)
-        cy, sy = math.cos(yaw / 2), math.sin(yaw / 2)
-        w = cr * cp * cy + sr * sp * sy
-        x = sr * cp * cy - cr * sp * sy
-        y = cr * sp * cy + sr * cp * sy
-        z = cr * cp * sy - sr * sp * cy
-        return [w, x, y, z]
+    def _norm_to_pwm(value):
+        """Convert -1..+1 to PWM 1000..2000."""
+        value = max(-1.0, min(1.0, value))
+        return int(RC_MID + value * (RC_MAX - RC_MID))

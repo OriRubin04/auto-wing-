@@ -58,7 +58,7 @@ class TrackingSystem:
     def start(self):
         logger.info("Connecting to flight controller...")
         self.mav.connect()
-        self.mav.set_guided_mode()
+        self.mav.set_fbwa_mode()
         logger.info("Ready. Waiting for GCS target selection.")
         self.running = True
         self._loop()
@@ -134,8 +134,8 @@ class TrackingSystem:
                 if target is not None and self.tracking:
                     self._send_control(target)
                 elif self.tracking and target is None:
-                    # Lost target: hold wings level
-                    self.mav.send_attitude_target(0.0, 0.0, throttle=self.cfg['control']['throttle'])
+                    # Lost target: hold wings level (centered sticks)
+                    self.mav.send_rc_override(0.0, 0.0, self.cfg['control']['throttle'])
 
     def _handle_gcs_message(self, msg, frame):
         action = msg.get('action')
@@ -150,7 +150,7 @@ class TrackingSystem:
             logger.info("GCS stop command")
             self.tracking = False
             self.detector.state = self.detector.STATE_SEARCHING
-            self.mav.send_attitude_target(0.0, 0.0, throttle=self.cfg['control']['throttle'])
+            self.mav.release_rc_override()
 
     def _send_control(self, target):
         cx, cy, tw, th = target
@@ -158,11 +158,10 @@ class TrackingSystem:
         error_x = (cx - self.frame_w / 2) / (self.frame_w / 2)
         error_y = (cy - self.frame_h / 2) / (self.frame_h / 2)
         roll, pitch, throttle = self.controller.compute(error_x, error_y)
-        self.mav.send_attitude_target(roll, pitch, throttle=throttle)
-        import math
+        self.mav.send_rc_override(roll, pitch, throttle)
         logger.info(
             f"CMD  err_x={error_x:+.2f} err_y={error_y:+.2f} | "
-            f"roll={math.degrees(roll):+.1f}deg  pitch={math.degrees(pitch):+.1f}deg  thr={throttle:.2f}"
+            f"roll={roll:+.2f}  pitch={pitch:+.2f}  thr={throttle:.2f}"
         )
 
     def _draw_hud(self, frame, target, state):
