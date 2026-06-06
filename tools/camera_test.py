@@ -5,9 +5,9 @@ Press Q to close each window.
 """
 import cv2
 
-print("Testing cameras 0-4 with DirectShow backend...\n")
+print("Testing cameras 0-9 with DirectShow backend...\n")
 
-for i in range(5):
+for i in range(10):
     cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)
     if not cap.isOpened():
         print(f"  index {i}: NOT found")
