@@ -18,9 +18,9 @@ control:
     kd: 0.03
     output_limit: 0.45
   pitch_pid:
-    kp: 0.07
+    kp: 0.25
     ki: 0.0
-    kd: 0.005
+    kd: 0.01
     output_limit: 0.12  # max pitch rate sent to ACRO — keep small to avoid flipping
   throttle: 0.45  # tune this: if plane still climbs when target centered, lower it
   update_rate_hz: 20
