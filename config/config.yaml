@@ -11,19 +11,19 @@ mavlink:
   takeoff_altitude: 50  # meters
 
 control:
-  # PID for roll (x-axis error)
+  # Roll — lateral tracking. In FBWA output = desired bank angle.
   roll_pid:
-    kp: 0.4
-    ki: 0.01
-    kd: 0.05
-    output_limit: 0.5  # max roll in radians (~28 deg)
-  # PID for pitch (y-axis error)
-  pitch_pid:
-    kp: 0.2
+    kp: 0.35
     ki: 0.005
-    kd: 0.02
-    output_limit: 0.3  # max pitch in radians (~17 deg)
-  throttle: 0.6  # constant throttle 0-1
+    kd: 0.03
+    output_limit: 0.45
+  # Pitch — KEEP SMALL on fixed-wing. Large pitch = stall/crash.
+  pitch_pid:
+    kp: 0.10
+    ki: 0.002
+    kd: 0.01
+    output_limit: 0.12
+  throttle: 0.58
   update_rate_hz: 20
 
 detection:

@@ -1,30 +1,29 @@
 import time
-import math
 import logging
 from pymavlink import mavutil
 
 logger = logging.getLogger(__name__)
 
-# RC channel PWM range
 RC_MIN = 1000
 RC_MID = 1500
 RC_MAX = 2000
 
-# ArduPlane mode numbers
-MODE_ACRO    = 1   # Acro — rate control, direct RC input, no attitude stabilization
-MODE_FBWA    = 5   # Fly By Wire A — stabilized, accepts RC input
-MODE_GUIDED  = 15
+# ArduPlane mode numbers (NOT ArduCopter — different numbering)
+MODE_MANUAL   = 0
+MODE_CIRCLE   = 1   # ← mode 1 is CIRCLE, NOT acro
+MODE_STABILIZE = 2
+MODE_ACRO     = 4   # actual Acro mode
+MODE_FBWA     = 5   # Fly By Wire A — stabilized, best for tracking
+MODE_GUIDED   = 15
 
 
 class MAVLinkInterface:
     """
-    pymavlink wrapper using RC_CHANNELS_OVERRIDE in FBWA mode.
+    pymavlink wrapper using RC_CHANNELS_OVERRIDE.
 
-    Why RC override instead of SET_ATTITUDE_TARGET:
-    - Works reliably with any ArduPilot build / SITL
-    - FBWA keeps the plane stable; we just push virtual sticks
-    - SET_ATTITUDE_TARGET on ArduPlane requires specific GUIDED sub-modes
-      that vary by firmware version and often silently do nothing
+    Use FBWA (mode 5) for visual tracking — it's stabilized so the plane
+    holds attitude between commands and won't diverge.  ACRO (mode 4) is
+    available but requires a much tighter control loop.
     """
 
     def __init__(self, connection_string, baudrate=115200):
@@ -41,47 +40,59 @@ class MAVLinkInterface:
             f"compid={self.mav.target_component}"
         )
 
-    def set_fbwa_mode(self):
-        """Switch ArduPlane to ACRO mode — rate control, direct RC sticks."""
-        logger.info(f"Sending ACRO mode command (sysid={self.mav.target_system})")
-        mode = None
-        for attempt in range(6):
-            self._set_mode(MODE_ACRO)
-            # Flush stale heartbeats before reading the new mode
+    def set_mode(self, mode_num, mode_name=""):
+        """Send mode command and wait for confirmation (retries up to 8×)."""
+        label = mode_name or str(mode_num)
+        logger.info(f"Requesting mode {label} ({mode_num}) …")
+
+        for attempt in range(8):
+            # Two message types — some ArduPlane builds accept one but not the other
+            self.mav.mav.command_long_send(
+                self.mav.target_system,
+                self.mav.target_component,
+                mavutil.mavlink.MAV_CMD_DO_SET_MODE, 0,
+                mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
+                mode_num, 0, 0, 0, 0, 0
+            )
+            self.mav.mav.set_mode_send(
+                self.mav.target_system,
+                mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
+                mode_num
+            )
+            # Drain heartbeats until we see the mode confirmed or time out
             deadline = time.time() + 1.5
             while time.time() < deadline:
-                msg = self.mav.recv_match(type='HEARTBEAT', blocking=True, timeout=0.5)
-                if msg and msg.custom_mode == MODE_ACRO:
-                    logger.info("Mode confirmed: ACRO ✓")
-                    return
-                if msg:
-                    mode = msg.custom_mode
-            logger.debug(f"Mode attempt {attempt + 1}/6: current mode={mode}")
-        logger.warning(
-            f"Mode is {mode}, expected {MODE_ACRO} (ACRO).\n"
-            "  → In Mission Planner: right-click the mode box → select ACRO\n"
-            "  → RC override will still work in current mode"
-        )
+                msg = self.mav.recv_match(type='HEARTBEAT', blocking=True, timeout=0.3)
+                if msg and msg.custom_mode == mode_num:
+                    logger.info(f"Mode {label} confirmed ✓")
+                    return True
+            logger.debug(f"Mode attempt {attempt + 1}/8 …")
 
-    def set_guided_mode(self):
-        """Switch ArduPlane to GUIDED mode (kept for compatibility)."""
-        self._set_mode(MODE_GUIDED)
-        time.sleep(0.5)
-        logger.info("GUIDED mode command sent")
+        current = self._read_mode()
+        logger.warning(
+            f"Could not switch to {label} (current mode={current}).\n"
+            f"  In Mission Planner: click the mode box (top-left) → select {label}\n"
+            f"  RC override still works in whatever mode the plane is in."
+        )
+        return False
+
+    def set_fbwa_mode(self):
+        return self.set_mode(MODE_FBWA, "FBWA")
+
+    def set_acro_mode(self):
+        return self.set_mode(MODE_ACRO, "ACRO")
 
     def _set_mode(self, mode_num):
         self.mav.mav.command_long_send(
             self.mav.target_system,
             self.mav.target_component,
-            mavutil.mavlink.MAV_CMD_DO_SET_MODE,
-            0,
+            mavutil.mavlink.MAV_CMD_DO_SET_MODE, 0,
             mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
-            mode_num,
-            0, 0, 0, 0, 0
+            mode_num, 0, 0, 0, 0, 0
         )
 
     def _read_mode(self):
-        msg = self.mav.recv_match(type='HEARTBEAT', blocking=True, timeout=3)
+        msg = self.mav.recv_match(type='HEARTBEAT', blocking=True, timeout=2)
         return msg.custom_mode if msg else '?'
 
     def arm(self):
@@ -95,26 +106,20 @@ class MAVLinkInterface:
 
     def send_rc_override(self, roll_norm, pitch_norm, throttle_norm=0.6, yaw_norm=0.0):
         """
-        Send RC_CHANNELS_OVERRIDE — simulates stick movement.
+        Simulate stick movement via RC_CHANNELS_OVERRIDE.
 
-        Args:
-            roll_norm:     -1.0 (full left) to +1.0 (full right)
-            pitch_norm:    -1.0 (full down) to +1.0 (full up)
-            throttle_norm:  0.0 to 1.0
-            yaw_norm:      -1.0 (full left) to +1.0 (full right)
+        In FBWA:  roll = desired bank angle,  pitch = desired pitch angle (stabilized)
+        In ACRO:  roll = roll rate,            pitch = pitch rate (not stabilized)
 
-        ArduPlane channel mapping (Mode 2):
-            CH1 = Roll (aileron)
-            CH2 = Pitch (elevator)   NOTE: 1000=up, 2000=down on most setups
-            CH3 = Throttle
-            CH4 = Yaw (rudder)
+        roll_norm:     -1.0 (full left) … +1.0 (full right)
+        pitch_norm:    -1.0 (nose down) … +1.0 (nose up)
+        throttle_norm:  0.0 … 1.0
         """
         ch1 = self._norm_to_pwm(roll_norm)
-        ch2 = self._norm_to_pwm(-pitch_norm)   # invert: positive pitch = nose up = lower PWM
+        ch2 = self._norm_to_pwm(-pitch_norm)  # invert: positive norm = nose up = lower PWM
         ch3 = int(RC_MIN + throttle_norm * (RC_MAX - RC_MIN))
         ch4 = self._norm_to_pwm(yaw_norm)
 
-        # Channels 5-8: 0 = do not override
         self.mav.mav.rc_channels_override_send(
             self.mav.target_system,
             self.mav.target_component,
@@ -123,7 +128,6 @@ class MAVLinkInterface:
         )
 
     def release_rc_override(self):
-        """Release all RC overrides — hand control back to pilot."""
         self.mav.mav.rc_channels_override_send(
             self.mav.target_system,
             self.mav.target_component,
@@ -147,6 +151,5 @@ class MAVLinkInterface:
 
     @staticmethod
     def _norm_to_pwm(value):
-        """Convert -1..+1 to PWM 1000..2000."""
         value = max(-1.0, min(1.0, value))
         return int(RC_MID + value * (RC_MAX - RC_MID))
