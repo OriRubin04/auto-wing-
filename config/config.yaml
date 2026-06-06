@@ -11,19 +11,18 @@ mavlink:
   takeoff_altitude: 50  # meters
 
 control:
-  # Roll — lateral tracking. In FBWA output = desired bank angle.
+  # ACRO mode: outputs are RATE commands, not angle commands.
   roll_pid:
     kp: 0.35
     ki: 0.005
     kd: 0.03
     output_limit: 0.45
-  # Pitch — KEEP SMALL on fixed-wing. Large pitch = stall/crash.
   pitch_pid:
-    kp: 0.10
-    ki: 0.002
-    kd: 0.01
-    output_limit: 0.12
-  throttle: 0.58
+    kp: 0.20
+    ki: 0.003
+    kd: 0.02
+    output_limit: 0.30
+  throttle: 0.55
   update_rate_hz: 20
 
 detection:

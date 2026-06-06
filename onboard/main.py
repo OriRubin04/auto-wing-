@@ -58,7 +58,7 @@ class TrackingSystem:
     def start(self):
         logger.info("Connecting to flight controller...")
         self.mav.connect()
-        self.mav.set_fbwa_mode()
+        self.mav.set_acro_mode()
         logger.info("Ready. Waiting for GCS target selection.")
         self.running = True
         self._loop()
