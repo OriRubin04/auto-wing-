@@ -80,9 +80,8 @@ class TrackingController:
         # Roll: normal PID — bank to turn toward lateral error
         raw_roll = self.roll_pid.compute(ex)
 
-        # Pitch: very conservative — fixed-wing stalls easily.
-        # Positive ey → target is BELOW centre → we need to descend → nose down (negative pitch)
-        raw_pitch = -self.pitch_pid.compute(ey)
+        # Pitch: positive ey → target below centre → nose DOWN → positive pitch_norm
+        raw_pitch = self.pitch_pid.compute(ey)
 
         # Throttle: slight trim for altitude (target below = back off throttle a touch)
         throttle = self.throttle_base - 0.08 * ey
