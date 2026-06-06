@@ -46,8 +46,8 @@ class TrackingController:
     • A deadband ignores tiny errors (avoids constant micro-corrections).
     """
 
-    DEADBAND = 0.06        # normalised error below which we do nothing
-    SMOOTH   = 0.55        # EMA weight on previous output (0 = no smoothing)
+    DEADBAND = 0.10        # normalised error below which we do nothing
+    SMOOTH   = 0.80        # EMA weight on previous output — higher = slower, smoother
 
     def __init__(self, cfg):
         r = cfg['roll_pid']
