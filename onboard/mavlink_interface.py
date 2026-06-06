@@ -43,10 +43,14 @@ class MAVLinkInterface:
 
     def set_fbwa_mode(self):
         """Switch ArduPlane to ACRO mode — rate control, direct RC sticks."""
+        logger.info(f"Sending ACRO mode command (sysid={self.mav.target_system})")
         self._set_mode(MODE_ACRO)
-        time.sleep(0.5)
+        time.sleep(1.0)
         mode = self._read_mode()
-        logger.info(f"Mode set → {mode} (target={MODE_ACRO} ACRO)")
+        if mode == MODE_ACRO:
+            logger.info("Mode confirmed: ACRO ✓")
+        else:
+            logger.warning(f"Mode is {mode}, expected {MODE_ACRO} (ACRO) — set it manually in Mission Planner")
 
     def set_guided_mode(self):
         """Switch ArduPlane to GUIDED mode (kept for compatibility)."""
