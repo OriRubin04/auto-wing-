@@ -48,7 +48,7 @@ class ObjectDetector:
                 logger.error(f"Failed to load YOLO: {e}")
 
     def select_target(self, click_x, click_y, frame):
-        """Called when user clicks on GCS. Find nearest YOLO detection."""
+        """Called when user clicks on GCS. Lock CSRT immediately on the clicked object."""
         self.target_center = (click_x, click_y)
         self.state = self.STATE_SEARCHING
         self.last_bbox = None
@@ -59,7 +59,10 @@ class ObjectDetector:
             bbox = self._yolo_nearest(frame, click_x, click_y)
             if bbox is not None:
                 self.last_bbox = bbox
-                self.state = self.STATE_YOLO
+                # Go straight to CSRT so we track THIS specific object's appearance,
+                # not whatever YOLO happens to detect nearest on the next frame.
+                self._init_cv_tracker(frame, bbox)
+                self.state = self.STATE_FALLBACK
                 logger.info(f"Target acquired via YOLO: {bbox}")
                 return True
 
@@ -87,13 +90,18 @@ class ObjectDetector:
             return None, self.state, annotated
 
         if self.state == self.STATE_YOLO:
-            bbox = self._yolo_nearest(frame, *self._bbox_center(self.last_bbox))
+            # Legacy path — shouldn't normally be reached now since select_target
+            # goes straight to CSRT, but kept as a safety net.
+            ref_cx, ref_cy = self._bbox_center(self.last_bbox)
+            bbox = self._yolo_nearest(frame, ref_cx, ref_cy, max_dist=150)
             if bbox is not None:
                 self.last_bbox = bbox
                 self.fail_count = 0
+                self._init_cv_tracker(frame, bbox)
+                self.state = self.STATE_FALLBACK
             else:
                 self.fail_count += 1
-                bbox = self.last_bbox  # use last known
+                bbox = self.last_bbox
                 if self.fail_count >= self.max_fails:
                     logger.warning("YOLO lost target, switching to CSRT")
                     self._init_cv_tracker(frame, self.last_bbox)
@@ -108,14 +116,22 @@ class ObjectDetector:
                     bbox = (x, y, w, h)
                     self.last_bbox = bbox
                     self.fail_count = 0
-                    # Periodically try YOLO again
                 else:
                     self.fail_count += 1
                     bbox = self.last_bbox
                     if self.fail_count >= self.max_fails * 2:
-                        logger.warning("CSRT lost target, entering SEARCHING")
-                        self.state = self.STATE_SEARCHING
-                        return None, self.state, annotated
+                        # Try YOLO re-acquisition near last known position
+                        ref_cx, ref_cy = self._bbox_center(self.last_bbox)
+                        new_bbox = self._yolo_nearest(frame, ref_cx, ref_cy, max_dist=120)
+                        if new_bbox is not None:
+                            logger.info("YOLO re-acquired target")
+                            self.last_bbox = new_bbox
+                            self._init_cv_tracker(frame, new_bbox)
+                            self.fail_count = 0
+                        else:
+                            logger.warning("CSRT lost target, entering SEARCHING")
+                            self.state = self.STATE_SEARCHING
+                            return None, self.state, annotated
             else:
                 return None, self.state, annotated
 
@@ -133,7 +149,8 @@ class ObjectDetector:
 
         return None, self.state, annotated
 
-    def _yolo_nearest(self, frame, ref_x, ref_y):
+    def _yolo_nearest(self, frame, ref_x, ref_y, max_dist=None):
+        """Find nearest YOLO detection to (ref_x, ref_y). Reject if farther than max_dist."""
         if self.model is None:
             return None
         try:
@@ -152,6 +169,8 @@ class ObjectDetector:
                     if dist < best_dist:
                         best_dist = dist
                         best_bbox = (x1, y1, x2 - x1, y2 - y1)
+            if best_bbox is not None and max_dist is not None and best_dist > max_dist:
+                return None  # nearest object is too far — don't jump
             return best_bbox
         except Exception as e:
             logger.error(f"YOLO inference error: {e}")

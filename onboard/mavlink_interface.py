@@ -44,13 +44,24 @@ class MAVLinkInterface:
     def set_fbwa_mode(self):
         """Switch ArduPlane to ACRO mode — rate control, direct RC sticks."""
         logger.info(f"Sending ACRO mode command (sysid={self.mav.target_system})")
-        self._set_mode(MODE_ACRO)
-        time.sleep(1.0)
-        mode = self._read_mode()
-        if mode == MODE_ACRO:
-            logger.info("Mode confirmed: ACRO ✓")
-        else:
-            logger.warning(f"Mode is {mode}, expected {MODE_ACRO} (ACRO) — set it manually in Mission Planner")
+        mode = None
+        for attempt in range(6):
+            self._set_mode(MODE_ACRO)
+            # Flush stale heartbeats before reading the new mode
+            deadline = time.time() + 1.5
+            while time.time() < deadline:
+                msg = self.mav.recv_match(type='HEARTBEAT', blocking=True, timeout=0.5)
+                if msg and msg.custom_mode == MODE_ACRO:
+                    logger.info("Mode confirmed: ACRO ✓")
+                    return
+                if msg:
+                    mode = msg.custom_mode
+            logger.debug(f"Mode attempt {attempt + 1}/6: current mode={mode}")
+        logger.warning(
+            f"Mode is {mode}, expected {MODE_ACRO} (ACRO).\n"
+            "  → In Mission Planner: right-click the mode box → select ACRO\n"
+            "  → RC override will still work in current mode"
+        )
 
     def set_guided_mode(self):
         """Switch ArduPlane to GUIDED mode (kept for compatibility)."""
