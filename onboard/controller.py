@@ -83,9 +83,8 @@ class TrackingController:
         # Pitch: positive ey → target below centre → nose DOWN → positive pitch_norm
         raw_pitch = self.pitch_pid.compute(ey)
 
-        # Throttle: slight trim for altitude (target below = back off throttle a touch)
-        throttle = self.throttle_base - 0.08 * ey
-        throttle = max(0.35, min(0.85, throttle))
+        # Throttle: fixed — no motor-based altitude correction
+        throttle = self.throttle_base
 
         # Smooth outputs — prevents jerky RC commands when tracker bounces
         self._roll_out  = self.SMOOTH * self._roll_out  + (1 - self.SMOOTH) * raw_roll

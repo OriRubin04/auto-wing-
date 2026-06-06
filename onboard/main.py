@@ -58,7 +58,6 @@ class TrackingSystem:
     def start(self):
         logger.info("Connecting to flight controller...")
         self.mav.connect()
-        self.mav.set_acro_mode()
         logger.info("Ready. Waiting for GCS target selection.")
         self.running = True
         self._loop()
@@ -143,6 +142,7 @@ class TrackingSystem:
             cx = msg.get('x', self.frame_w // 2)
             cy = msg.get('y', self.frame_h // 2)
             logger.info(f"GCS selected target at ({cx}, {cy})")
+            self.mav.set_acro_mode()
             self.detector.select_target(cx, cy, frame)
             self.controller.reset()
             self.tracking = True

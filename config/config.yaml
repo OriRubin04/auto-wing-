@@ -22,7 +22,7 @@ control:
     ki: 0.003
     kd: 0.02
     output_limit: 0.30
-  throttle: 0.55
+  throttle: 0.45  # tune this: if plane still climbs when target centered, lower it
   update_rate_hz: 20
 
 detection:
