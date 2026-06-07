@@ -146,15 +146,29 @@ class TrackingSystem:
             self.mav.release_rc_override()
             self.mav.set_rtl_mode()
 
+    # How strongly to correct bank angle when target is centered (rad -> roll rate)
+    # Lower = smoother but slower leveling. Tune up if wings level too slowly.
+    LEVEL_KP = 0.3
+    # Ignore bank angles smaller than this (radians ~3 deg) to avoid micro-corrections
+    LEVEL_DEADBAND = 0.05
+
     def _send_control(self, target):
         cx, cy, tw, th = target
         error_x = float((cx - self.frame_w / 2) / (self.frame_w / 2))
         error_y = float((cy - self.frame_h / 2) / (self.frame_h / 2))
         roll, pitch, throttle = self.controller.compute(error_x, error_y)
 
-        # When target is centered, stop all roll — let the plane hold whatever attitude it has
+        # When target is centered, level the wings using attitude feedback
         if abs(error_x) < self.controller.DEADBAND:
-            roll = 0.0
+            attitude = self.mav.get_attitude()
+            if attitude is not None:
+                bank_rad = float(attitude[0])
+                if abs(bank_rad) > self.LEVEL_DEADBAND:
+                    roll = float(max(-0.5, min(0.5, -self.LEVEL_KP * bank_rad)))
+                else:
+                    roll = 0.0
+            else:
+                roll = 0.0
 
         self.mav.send_rc_override(roll, pitch, throttle)
         logger.info(
