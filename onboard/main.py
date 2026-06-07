@@ -147,10 +147,11 @@ class TrackingSystem:
             self.controller.reset()
             self.tracking = True
         elif action == 'stop':
-            logger.info("GCS stop command")
+            logger.info("GCS stop command — switching to RTL")
             self.tracking = False
             self.detector.state = self.detector.STATE_SEARCHING
             self.mav.release_rc_override()
+            self.mav.set_rtl_mode()
 
     def _send_control(self, target):
         cx, cy, tw, th = target

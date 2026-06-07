@@ -15,6 +15,7 @@ MODE_STABILIZE = 2
 MODE_ACRO     = 4   # actual Acro mode
 MODE_FBWA     = 5   # Fly By Wire A — stabilized, best for tracking
 MODE_GUIDED   = 15
+MODE_RTL      = 11
 
 
 class MAVLinkInterface:
@@ -81,6 +82,9 @@ class MAVLinkInterface:
 
     def set_acro_mode(self):
         return self.set_mode(MODE_ACRO, "ACRO")
+
+    def set_rtl_mode(self):
+        return self.set_mode(MODE_RTL, "RTL")
 
     def _set_mode(self, mode_num):
         self.mav.mav.command_long_send(
