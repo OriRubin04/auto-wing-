@@ -159,8 +159,8 @@ class TrackingSystem:
     def _send_control(self, target):
         cx, cy, tw, th = target
         # Normalized error: -1 (left/up) to +1 (right/down)
-        error_x = (cx - self.frame_w / 2) / (self.frame_w / 2)
-        error_y = (cy - self.frame_h / 2) / (self.frame_h / 2)
+        error_x = float((cx - self.frame_w / 2) / (self.frame_w / 2))
+        error_y = float((cy - self.frame_h / 2) / (self.frame_h / 2))
         roll, pitch, throttle = self.controller.compute(error_x, error_y)
 
         # When target is centered, actively level wings using attitude feedback
