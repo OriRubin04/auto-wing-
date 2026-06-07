@@ -47,7 +47,7 @@ class TrackingController:
     """
 
     DEADBAND = 0.10        # normalised error below which we do nothing
-    SMOOTH   = 0.50        # EMA weight on previous output — higher = slower, smoother
+    SMOOTH   = 0.0        # EMA weight on previous output — higher = slower, smoother
 
     def __init__(self, cfg):
         r = cfg['roll_pid']
