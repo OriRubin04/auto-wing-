@@ -142,7 +142,7 @@ class TrackingSystem:
             cx = msg.get('x', self.frame_w // 2)
             cy = msg.get('y', self.frame_h // 2)
             logger.info(f"GCS selected target at ({cx}, {cy})")
-            self.mav.set_fbwa_mode()
+            self.mav.set_acro_mode()
             self.detector.select_target(cx, cy, frame)
             self.controller.reset()
             self.tracking = True
@@ -153,12 +153,23 @@ class TrackingSystem:
             self.mav.release_rc_override()
             self.mav.set_rtl_mode()
 
+    # Gain for attitude-based wing leveling (radians of bank → roll rate command)
+    LEVEL_KP = 0.8
+
     def _send_control(self, target):
         cx, cy, tw, th = target
         # Normalized error: -1 (left/up) to +1 (right/down)
         error_x = (cx - self.frame_w / 2) / (self.frame_w / 2)
         error_y = (cy - self.frame_h / 2) / (self.frame_h / 2)
         roll, pitch, throttle = self.controller.compute(error_x, error_y)
+
+        # When target is centered, actively level wings using attitude feedback
+        if abs(error_x) < self.controller.DEADBAND:
+            attitude = self.mav.get_attitude()
+            if attitude is not None:
+                bank_rad = attitude[0]  # roll angle in radians
+                roll = max(-0.80, min(0.80, -self.LEVEL_KP * bank_rad))
+
         self.mav.send_rc_override(roll, pitch, throttle)
         logger.info(
             f"CMD  err_x={error_x:+.2f} err_y={error_y:+.2f} | "
