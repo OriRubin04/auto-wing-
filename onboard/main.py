@@ -70,7 +70,6 @@ class TrackingSystem:
             if not cap.isOpened():
                 cap.release()
                 continue
-            # Warm up — some drivers need a few frames before reporting correct resolution
             for _ in range(5):
                 cap.read()
                 time.sleep(0.05)
@@ -96,7 +95,7 @@ class TrackingSystem:
             if not ret:
                 cam_fail_count += 1
                 if cam_fail_count % 20 == 1:
-                    logger.warning(f"Camera read failed ({cam_fail_count}x) — reopening...")
+                    logger.warning(f"Camera read failed ({cam_fail_count}x) - reopening...")
                     self.cap.release()
                     time.sleep(1.0)
                     try:
@@ -111,29 +110,23 @@ class TrackingSystem:
                 continue
             cam_fail_count = 0
 
-            # Check for GCS registration & stream frame
             self.streamer.check_registration()
 
-            # Process control messages from GCS
             for msg in self.control_server.get_messages():
                 self._handle_gcs_message(msg, frame)
 
-            # Run detection
             result = self.detector.process(frame)
             target, state, annotated = result
 
-            # Draw HUD
             self._draw_hud(annotated, target, state)
             self.streamer.send_frame(annotated)
 
-            # Control loop at fixed rate
             now = time.time()
             if now - last_update >= self.update_interval:
                 last_update = now
                 if target is not None and self.tracking:
                     self._send_control(target)
                 elif self.tracking and target is None:
-                    # Lost target: hold wings level (centered sticks)
                     self.mav.send_rc_override(0.0, 0.0, self.cfg['control']['throttle'])
 
     def _handle_gcs_message(self, msg, frame):
@@ -147,28 +140,21 @@ class TrackingSystem:
             self.controller.reset()
             self.tracking = True
         elif action == 'stop':
-            logger.info("GCS stop command — switching to RTL")
+            logger.info("GCS stop command - switching to RTL")
             self.tracking = False
             self.detector.state = self.detector.STATE_SEARCHING
             self.mav.release_rc_override()
             self.mav.set_rtl_mode()
 
-    # Gain for attitude-based wing leveling (radians of bank → roll rate command)
-    LEVEL_KP = 0.8
-
     def _send_control(self, target):
         cx, cy, tw, th = target
-        # Normalized error: -1 (left/up) to +1 (right/down)
         error_x = float((cx - self.frame_w / 2) / (self.frame_w / 2))
         error_y = float((cy - self.frame_h / 2) / (self.frame_h / 2))
         roll, pitch, throttle = self.controller.compute(error_x, error_y)
 
-        # When target is centered, actively level wings using attitude feedback
+        # When target is centered, stop all roll — let the plane hold whatever attitude it has
         if abs(error_x) < self.controller.DEADBAND:
-            attitude = self.mav.get_attitude()
-            if attitude is not None:
-                bank_rad = attitude[0]  # roll angle in radians
-                roll = max(-0.80, min(0.80, -self.LEVEL_KP * bank_rad))
+            roll = 0.0
 
         self.mav.send_rc_override(roll, pitch, throttle)
         logger.info(
@@ -178,10 +164,8 @@ class TrackingSystem:
 
     def _draw_hud(self, frame, target, state):
         h, w = frame.shape[:2]
-        # Crosshair at frame center
         cv2.line(frame, (w//2 - 20, h//2), (w//2 + 20, h//2), (255, 255, 255), 1)
         cv2.line(frame, (w//2, h//2 - 20), (w//2, h//2 + 20), (255, 255, 255), 1)
-        # Status text
         status_color = (0, 255, 0) if self.tracking else (0, 0, 255)
         status = f"{'TRACKING' if self.tracking else 'STANDBY'} | {state.upper()}"
         cv2.putText(frame, status, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, status_color, 2)
