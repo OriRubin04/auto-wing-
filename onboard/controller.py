@@ -73,9 +73,11 @@ class TrackingController:
 
         Returns (roll_norm, pitch_norm, throttle_norm).
         """
-        # Apply deadband
-        ex = 0.0 if abs(error_x_norm) < self.DEADBAND else error_x_norm
-        ey = 0.0 if abs(error_y_norm) < self.DEADBAND else error_y_norm
+        # Apply deadband (cast to float — tracker may return numpy scalars)
+        ex_f = float(error_x_norm)
+        ey_f = float(error_y_norm)
+        ex = 0.0 if abs(ex_f) < self.DEADBAND else ex_f
+        ey = 0.0 if abs(ey_f) < self.DEADBAND else ey_f
 
         # Roll: normal PID — bank to turn toward lateral error
         raw_roll = self.roll_pid.compute(ex)
