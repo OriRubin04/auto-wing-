@@ -142,7 +142,7 @@ class TrackingSystem:
             cx = msg.get('x', self.frame_w // 2)
             cy = msg.get('y', self.frame_h // 2)
             logger.info(f"GCS selected target at ({cx}, {cy})")
-            self.mav.set_acro_mode()
+            self.mav.set_fbwa_mode()
             self.detector.select_target(cx, cy, frame)
             self.controller.reset()
             self.tracking = True
