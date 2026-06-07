@@ -17,6 +17,7 @@ class PID:
         self._prev_time = None
 
     def compute(self, error):
+        error = float(error)
         now = time.time()
         dt = 0.05 if self._prev_time is None else max(now - self._prev_time, 0.001)
         self._prev_time = now
@@ -68,8 +69,8 @@ class TrackingController:
 
     def compute(self, error_x_norm, error_y_norm):
         """
-        error_x_norm  -1…+1  (negative = target left of centre)
-        error_y_norm  -1…+1  (negative = target above centre, positive = below)
+        error_x_norm  -1…1  (negative = target left of centre)
+        error_y_norm  -1…1  (negative = target above centre, positive = below)
 
         Returns (roll_norm, pitch_norm, throttle_norm).
         """
