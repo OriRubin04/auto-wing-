@@ -32,6 +32,7 @@ class TrackingSystem:
         self.cfg = cfg
         self.running = False
         self.tracking = False
+        self._last_bank_rad = 0.0  # cached attitude for wing leveling
 
         cam_cfg = cfg['camera']
         cam_index = cam_cfg['index']
@@ -110,6 +111,11 @@ class TrackingSystem:
                 continue
             cam_fail_count = 0
 
+            # Always drain the MAVLink attitude buffer so _last_bank_rad stays fresh
+            attitude = self.mav.get_attitude()
+            if attitude is not None:
+                self._last_bank_rad = float(attitude[0])
+
             self.streamer.check_registration()
 
             for msg in self.control_server.get_messages():
@@ -146,11 +152,8 @@ class TrackingSystem:
             self.mav.release_rc_override()
             self.mav.set_rtl_mode()
 
-    # How strongly to correct bank angle when target is centered (rad -> roll rate)
-    # Lower = smoother but slower leveling. Tune up if wings level too slowly.
-    LEVEL_KP = 0.3
-    # Ignore bank angles smaller than this (radians ~3 deg) to avoid micro-corrections
-    LEVEL_DEADBAND = 0.05
+    LEVEL_KP = 0.3          # bank angle (rad) -> roll rate command
+    LEVEL_DEADBAND = 0.05   # ignore bank angles smaller than ~3 deg
 
     def _send_control(self, target):
         cx, cy, tw, th = target
@@ -158,21 +161,17 @@ class TrackingSystem:
         error_y = float((cy - self.frame_h / 2) / (self.frame_h / 2))
         roll, pitch, throttle = self.controller.compute(error_x, error_y)
 
-        # When target is centered, level the wings using attitude feedback
+        # When target is centered, use cached bank angle to level wings every frame
         if abs(error_x) < self.controller.DEADBAND:
-            attitude = self.mav.get_attitude()
-            if attitude is not None:
-                bank_rad = float(attitude[0])
-                if abs(bank_rad) > self.LEVEL_DEADBAND:
-                    roll = float(max(-0.5, min(0.5, -self.LEVEL_KP * bank_rad)))
-                else:
-                    roll = 0.0
+            if abs(self._last_bank_rad) > self.LEVEL_DEADBAND:
+                roll = float(max(-0.5, min(0.5, -self.LEVEL_KP * self._last_bank_rad)))
             else:
                 roll = 0.0
 
         self.mav.send_rc_override(roll, pitch, throttle)
         logger.info(
-            f"CMD  err_x={error_x:+.2f} err_y={error_y:+.2f} | "
+            f"CMD  err_x={error_x:+.2f} err_y={error_y:+.2f} "
+            f"bank={self._last_bank_rad:+.2f}rad | "
             f"roll={roll:+.2f}  pitch={pitch:+.2f}  thr={throttle:.2f}"
         )
 
