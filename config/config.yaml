@@ -13,10 +13,10 @@ mavlink:
 control:
   # ACRO mode: outputs are RATE commands, not angle commands.
   roll_pid:
-    kp: 0.70
+    kp: 1.20
     ki: 0.0
-    kd: 0.05
-    output_limit: 0.65
+    kd: 0.08
+    output_limit: 0.80
   pitch_pid:
     kp: 0.25
     ki: 0.0
