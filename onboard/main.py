@@ -133,7 +133,8 @@ class TrackingSystem:
                 if target is not None and self.tracking:
                     self._send_control(target)
                 elif self.tracking and target is None:
-                    self.mav.send_rc_override(0.0, 0.0, self.cfg['control']['throttle'])
+                    # Lost target while tracking in ACRO: hold level sticks, motor off
+                    self.mav.send_rc_override(0.0, 0.0, self.ACRO_THROTTLE)
 
     def _handle_gcs_message(self, msg, frame):
         action = msg.get('action')
@@ -154,12 +155,19 @@ class TrackingSystem:
 
     LEVEL_KP = 0.3          # bank angle (rad) -> roll rate command
     LEVEL_DEADBAND = 0.05   # ignore bank angles smaller than ~3 deg
+    # Throttle (0..1) commanded while tracking in ACRO mode.
+    # 0.0 = motor off (gliding tracking).  RTL is unaffected: when we stop we
+    # release the RC override entirely, so ArduPilot controls throttle in RTL.
+    ACRO_THROTTLE = 0.0
 
     def _send_control(self, target):
         cx, cy, tw, th = target
         error_x = float((cx - self.frame_w / 2) / (self.frame_w / 2))
         error_y = float((cy - self.frame_h / 2) / (self.frame_h / 2))
-        roll, pitch, throttle = self.controller.compute(error_x, error_y)
+        roll, pitch, _ = self.controller.compute(error_x, error_y)
+
+        # ACRO tracking: motor off (0% throttle).
+        throttle = self.ACRO_THROTTLE
 
         # When target is centered, use cached bank angle to level wings every frame
         if abs(error_x) < self.controller.DEADBAND:
