@@ -28,3 +28,6 @@ recordings/
 .DS_Store
 .idea/
 .vscode/
+
+# Flight logs (video + telemetry) - large, generated per run
+logs/

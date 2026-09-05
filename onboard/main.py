@@ -20,6 +20,7 @@ from onboard.detector import ObjectDetector
 from onboard.controller import TrackingController
 from onboard.mavlink_interface import MAVLinkInterface
 from onboard.streamer import VideoStreamer, ControlServer
+from onboard.flight_log import FlightLogger
 
 
 def load_config(path='config/config.yaml'):
@@ -54,11 +55,22 @@ class TrackingSystem:
         )
         self.control_server = ControlServer(cfg['gcs']['control_port'])
 
+        self.flight_log = FlightLogger(cfg.get('logging', {}))
+        # Last command issued, so the log records what we actually sent even on
+        # frames where the rate-limited control loop did not run.
+        self._last_cmd = (0.0, 0.0, 0.0)
+        self._last_err = (0.0, 0.0)
+
         self.update_interval = 1.0 / cfg['control']['update_rate_hz']
 
     def start(self):
         logger.info("Connecting to flight controller...")
         self.mav.connect()
+        self.flight_log.start(
+            self.frame_w, self.frame_h,
+            fps=self.cfg['camera'].get('fps', 25),
+            meta={'config': self.cfg},
+        )
         logger.info("Ready. Waiting for GCS target selection.")
         self.running = True
         self._loop()
@@ -110,6 +122,7 @@ class TrackingSystem:
                     time.sleep(0.05)
                 continue
             cam_fail_count = 0
+            loop_t0 = time.time()
 
             # Always drain the MAVLink attitude buffer so _last_bank_rad stays fresh
             attitude = self.mav.get_attitude()
@@ -135,6 +148,29 @@ class TrackingSystem:
                 elif self.tracking and target is None:
                     # Lost target while tracking in ACRO: hold level sticks, motor off
                     self.mav.send_rc_override(0.0, 0.0, self.ACRO_THROTTLE)
+                    self._last_cmd = (0.0, 0.0, self.ACRO_THROTTLE)
+                    self._last_err = (0.0, 0.0)
+
+            # Log the RAW frame (no HUD): annotations can be regenerated from
+            # flight.csv, but they cannot be removed from burned-in pixels.
+            roll, pitch, thr = self._last_cmd
+            err_x, err_y = self._last_err
+            self.flight_log.log_frame(frame, {
+                'state': state,
+                'tracking': int(self.tracking),
+                'target_cx': target[0] if target else '',
+                'target_cy': target[1] if target else '',
+                'target_w': target[2] if target else '',
+                'target_h': target[3] if target else '',
+                'err_x': f"{err_x:.4f}",
+                'err_y': f"{err_y:.4f}",
+                'roll_cmd': f"{roll:.4f}",
+                'pitch_cmd': f"{pitch:.4f}",
+                'throttle_cmd': f"{thr:.3f}",
+                'bank_rad': f"{self._last_bank_rad:.4f}",
+                'fail_count': self.detector.fail_count,
+                'loop_ms': f"{(time.time() - loop_t0) * 1000:.2f}",
+            })
 
     def _handle_gcs_message(self, msg, frame):
         action = msg.get('action')
@@ -143,15 +179,18 @@ class TrackingSystem:
             cy = msg.get('y', self.frame_h // 2)
             logger.info(f"GCS selected target at ({cx}, {cy})")
             self.mav.set_acro_mode()
-            self.detector.select_target(cx, cy, frame)
+            ok = self.detector.select_target(cx, cy, frame)
             self.controller.reset()
             self.tracking = True
+            self.flight_log.log_event('target_select', x=cx, y=cy, ok=bool(ok),
+                                      bbox=self.detector.last_bbox)
         elif action == 'stop':
             logger.info("GCS stop command - switching to RTL")
             self.tracking = False
             self.detector.state = self.detector.STATE_SEARCHING
             self.mav.release_rc_override()
             self.mav.set_rtl_mode()
+            self.flight_log.log_event('stop_rtl')
 
     LEVEL_KP = 0.3          # bank angle (rad) -> roll rate command
     LEVEL_DEADBAND = 0.05   # ignore bank angles smaller than ~3 deg
@@ -177,6 +216,8 @@ class TrackingSystem:
                 roll = 0.0
 
         self.mav.send_rc_override(roll, pitch, throttle)
+        self._last_cmd = (roll, pitch, throttle)
+        self._last_err = (error_x, error_y)
         logger.info(
             f"CMD  err_x={error_x:+.2f} err_y={error_y:+.2f} "
             f"bank={self._last_bank_rad:+.2f}rad | "
@@ -199,6 +240,7 @@ class TrackingSystem:
 
     def stop(self):
         self.running = False
+        self.flight_log.close()
         self.cap.release()
         self.streamer.close()
         self.control_server.close()
