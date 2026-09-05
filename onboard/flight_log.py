@@ -47,7 +47,7 @@ CSV_FIELDS = [
     'target_cx', 'target_cy', 'target_w', 'target_h',
     'err_x', 'err_y',
     'roll_cmd', 'pitch_cmd', 'throttle_cmd',
-    'bank_rad', 'fail_count', 'loop_ms',
+    'bank_rad', 'fail_count', 'confidence', 'loop_ms',
 ]
 
 

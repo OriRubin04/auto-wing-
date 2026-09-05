@@ -92,6 +92,10 @@ class ObjectDetector:
         self.last_bbox = None   # (x, y, w, h) — top-left corner + size
         self.fail_count = 0
         self.max_fails = cfg.get('max_detection_failures', 10)
+        # Consecutive CSRT failures tolerated before we give up and re-acquire.
+        # Frames 1..coast_limit-1 are "coasting": the box returned is the last
+        # KNOWN position, not a fresh measurement.
+        self.coast_limit = self.max_fails * 2
         self._cv_tracker = None
         self._tracker_type = cfg.get('fallback_tracker', 'CSRT')
         self.proposer = make_proposer(cfg)
@@ -99,6 +103,26 @@ class ObjectDetector:
     # ------------------------------------------------------------------ #
     #  Public API                                                          #
     # ------------------------------------------------------------------ #
+
+    def confidence(self):
+        """
+        How much to trust the position currently being reported, 0.0 … 1.0.
+
+        1.0  = fresh CSRT measurement this frame.
+        <1.0 = coasting on the last known box; decays linearly with the number
+               of consecutive failures.
+        0.0  = the box is as old as we are willing to act on at all.
+
+        Callers scale control commands by this so the aircraft stops
+        committing to a stale position gradually rather than either steering
+        blindly for the whole coast window or jerking to a stop on every
+        single-frame tracker hiccup.
+        """
+        if self.state != self.STATE_TRACKING or self.last_bbox is None:
+            return 0.0
+        if self.fail_count <= 0:
+            return 1.0
+        return max(0.0, 1.0 - (self.fail_count / float(self.coast_limit)))
 
     def select_target(self, click_x, click_y, frame):
         """Called when the user clicks on GCS.  Initialises CSRT immediately."""
@@ -150,7 +174,7 @@ class ObjectDetector:
 
         if not ok:
             self.fail_count += 1
-            if self.fail_count >= self.max_fails * 2:
+            if self.fail_count >= self.coast_limit:
                 # Try re-acquisition near last known position
                 ref_cx, ref_cy = self._bbox_center(self.last_bbox)
                 new_bbox = self.proposer.find_nearest(frame, ref_cx, ref_cy, max_dist=120)

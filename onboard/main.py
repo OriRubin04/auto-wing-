@@ -124,7 +124,9 @@ class TrackingSystem:
             cam_fail_count = 0
             loop_t0 = time.time()
 
-            # Always drain the MAVLink attitude buffer so _last_bank_rad stays fresh
+            # Single MAVLink drain: refreshes the attitude cache and services
+            # any outstanding mode request without ever blocking the loop.
+            self.mav.poll()
             attitude = self.mav.get_attitude()
             if attitude is not None:
                 self._last_bank_rad = float(attitude[0])
@@ -169,6 +171,7 @@ class TrackingSystem:
                 'throttle_cmd': f"{thr:.3f}",
                 'bank_rad': f"{self._last_bank_rad:.4f}",
                 'fail_count': self.detector.fail_count,
+                'confidence': f"{self.detector.confidence():.3f}",
                 'loop_ms': f"{(time.time() - loop_t0) * 1000:.2f}",
             })
 
@@ -208,7 +211,18 @@ class TrackingSystem:
         # ACRO tracking: motor off (0% throttle).
         throttle = self.ACRO_THROTTLE
 
-        # When target is centered, use cached bank angle to level wings every frame
+        # Derate by how fresh the tracker position is.  While coasting, the box
+        # is the last KNOWN position rather than a measurement, so authority
+        # decays linearly with consecutive tracker failures instead of steering
+        # at full strength on data that can be ~2 s old.
+        conf = self.detector.confidence()
+        roll *= conf
+        pitch *= conf
+
+        # When target is centered, use cached bank angle to level wings every
+        # frame.  Deliberately NOT derated: this comes from a live ATTITUDE
+        # reading rather than from tracker pixels, and levelling is the safe
+        # thing to be doing when we are unsure where the target is.
         if abs(error_x) < self.controller.DEADBAND:
             if abs(self._last_bank_rad) > self.LEVEL_DEADBAND:
                 roll = float(max(-0.5, min(0.5, -self.LEVEL_KP * self._last_bank_rad)))
@@ -220,7 +234,7 @@ class TrackingSystem:
         self._last_err = (error_x, error_y)
         logger.info(
             f"CMD  err_x={error_x:+.2f} err_y={error_y:+.2f} "
-            f"bank={self._last_bank_rad:+.2f}rad | "
+            f"bank={self._last_bank_rad:+.2f}rad conf={conf:.2f} | "
             f"roll={roll:+.2f}  pitch={pitch:+.2f}  thr={throttle:.2f}"
         )
 
