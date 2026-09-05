@@ -1,169 +1,246 @@
 import cv2
-import math
-import numpy as np
 import logging
+
+from onboard.saliency import SaliencyDetector
 
 logger = logging.getLogger(__name__)
 
-try:
-    from ultralytics import YOLO
-    YOLO_AVAILABLE = True
-except ImportError:
-    YOLO_AVAILABLE = False
-    logger.warning("ultralytics not installed, YOLO unavailable")
+
+# Size of the patch CSRT is initialised on, in pixels.
+# Smaller = more specific (less likely to drift); bigger = more texture = more stable.
+INIT_PATCH_SIZE = 72
 
 
-class ObjectDetector:
+class YoloProposer:
     """
-    YOLO-based detector with OpenCV tracker fallback.
+    Optional YOLO proposal backend.
 
-    Workflow:
-    1. User selects a point (click) on GCS.
-    2. First YOLO frame finds the bounding box nearest that point.
-    3. Track that box. If YOLO fails N frames, switch to OpenCV CSRT tracker.
-    4. If CSRT also fails, enter SEARCHING state.
+    Kept so the saliency swap can be A/B'd or reverted, but no longer a hard
+    dependency - `ultralytics` (and the ~2 GB of PyTorch behind it) is imported
+    lazily and only when detection.backend is explicitly set to "yolo".
     """
-
-    STATE_SEARCHING = "searching"
-    STATE_YOLO = "yolo"
-    STATE_FALLBACK = "fallback"
 
     def __init__(self, cfg):
+        from ultralytics import YOLO      # lazy: not required for the default path
         self.cfg = cfg
-        self.model = None
-        self.state = self.STATE_SEARCHING
-        self.target_class = None
-        self.target_center = None  # (x, y) pixel user clicked
-        self.last_bbox = None  # (x, y, w, h)
-        self.fail_count = 0
-        self.max_fails = cfg.get('max_detection_failures', 10)
-        self._cv_tracker = None
-        self._tracker_type = cfg.get('fallback_tracker', 'CSRT')
+        self.model = YOLO(cfg.get('model', 'yolov8n.pt'))
+        logger.info("Proposal backend: YOLO")
 
-        if YOLO_AVAILABLE:
-            try:
-                self.model = YOLO(cfg.get('model', 'yolov8n.pt'))
-                logger.info("YOLO model loaded")
-            except Exception as e:
-                logger.error(f"Failed to load YOLO: {e}")
-
-    def select_target(self, click_x, click_y, frame):
-        """Called when user clicks on GCS. Find nearest YOLO detection."""
-        self.target_center = (click_x, click_y)
-        self.state = self.STATE_SEARCHING
-        self.last_bbox = None
-        self.fail_count = 0
-        self._cv_tracker = None
-
-        if self.model is not None:
-            bbox = self._yolo_nearest(frame, click_x, click_y)
-            if bbox is not None:
-                self.last_bbox = bbox
-                self.state = self.STATE_YOLO
-                logger.info(f"Target acquired via YOLO: {bbox}")
-                return True
-
-        # Fallback: use clicked region as initial bbox (80x80 box around click)
-        h, w = frame.shape[:2]
-        size = 80
-        x1 = max(0, click_x - size // 2)
-        y1 = max(0, click_y - size // 2)
-        x1 = min(x1, w - size)
-        y1 = min(y1, h - size)
-        self.last_bbox = (x1, y1, size, size)
-        self._init_cv_tracker(frame, self.last_bbox)
-        self.state = self.STATE_FALLBACK
-        logger.info(f"Target acquired via manual ROI: {self.last_bbox}")
-        return True
-
-    def process(self, frame):
-        """
-        Returns (bbox, state, annotated_frame) or (None, state, annotated_frame).
-        bbox is (cx, cy, w, h) in pixels.
-        """
-        annotated = frame.copy()
-
-        if self.state == self.STATE_SEARCHING:
-            return None, self.state, annotated
-
-        if self.state == self.STATE_YOLO:
-            bbox = self._yolo_nearest(frame, *self._bbox_center(self.last_bbox))
-            if bbox is not None:
-                self.last_bbox = bbox
-                self.fail_count = 0
-            else:
-                self.fail_count += 1
-                bbox = self.last_bbox  # use last known
-                if self.fail_count >= self.max_fails:
-                    logger.warning("YOLO lost target, switching to CSRT")
-                    self._init_cv_tracker(frame, self.last_bbox)
-                    self.state = self.STATE_FALLBACK
-                    self.fail_count = 0
-
-        elif self.state == self.STATE_FALLBACK:
-            if self._cv_tracker is not None:
-                ok, rect = self._cv_tracker.update(frame)
-                if ok:
-                    x, y, w, h = [int(v) for v in rect]
-                    bbox = (x, y, w, h)
-                    self.last_bbox = bbox
-                    self.fail_count = 0
-                    # Periodically try YOLO again
-                else:
-                    self.fail_count += 1
-                    bbox = self.last_bbox
-                    if self.fail_count >= self.max_fails * 2:
-                        logger.warning("CSRT lost target, entering SEARCHING")
-                        self.state = self.STATE_SEARCHING
-                        return None, self.state, annotated
-            else:
-                return None, self.state, annotated
-
-        # Annotate frame
-        if self.last_bbox:
-            x, y, w, h = self.last_bbox
-            cx = x + w // 2
-            cy = y + h // 2
-            color = (0, 255, 0) if self.state == self.STATE_YOLO else (0, 165, 255)
-            cv2.rectangle(annotated, (x, y), (x + w, y + h), color, 2)
-            cv2.circle(annotated, (cx, cy), 5, color, -1)
-            label = f"YOLO" if self.state == self.STATE_YOLO else "CSRT"
-            cv2.putText(annotated, label, (x, y - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-            return (cx, cy, w, h), self.state, annotated
-
-        return None, self.state, annotated
-
-    def _yolo_nearest(self, frame, ref_x, ref_y):
-        if self.model is None:
-            return None
+    def find_nearest(self, frame, ref_x, ref_y, max_dist=None):
+        """Nearest YOLO detection to (ref_x, ref_y), optional distance gate."""
         try:
-            results = self.model(frame, conf=self.cfg.get('confidence', 0.4),
-                                 iou=self.cfg.get('iou', 0.45),
-                                 device=self.cfg.get('device', 'cpu'),
-                                 verbose=False)
-            best_bbox = None
-            best_dist = float('inf')
+            results = self.model(
+                frame,
+                conf=self.cfg.get('confidence', 0.4),
+                iou=self.cfg.get('iou', 0.45),
+                device=self.cfg.get('device', 'cpu'),
+                verbose=False
+            )
+            best, best_dist = None, float('inf')
             for r in results:
                 for box in r.boxes:
                     x1, y1, x2, y2 = [int(v) for v in box.xyxy[0]]
                     cx = (x1 + x2) // 2
                     cy = (y1 + y2) // 2
-                    dist = math.hypot(cx - ref_x, cy - ref_y)
-                    if dist < best_dist:
-                        best_dist = dist
-                        best_bbox = (x1, y1, x2 - x1, y2 - y1)
-            return best_bbox
+                    d = ((cx - ref_x) ** 2 + (cy - ref_y) ** 2) ** 0.5
+                    if d < best_dist:
+                        best_dist = d
+                        best = (x1, y1, x2 - x1, y2 - y1)
+            if best is not None and max_dist is not None and best_dist > max_dist:
+                return None
+            return best
         except Exception as e:
-            logger.error(f"YOLO inference error: {e}")
+            logger.error(f"YOLO error: {e}")
             return None
 
-    def _init_cv_tracker(self, frame, bbox):
+
+def make_proposer(cfg):
+    """Build the object-proposal backend named by detection.backend."""
+    backend = str(cfg.get('backend', 'saliency')).lower()
+    if backend == 'yolo':
         try:
-            self._cv_tracker = cv2.TrackerCSRT_create()
-            self._cv_tracker.init(frame, bbox)
+            return YoloProposer(cfg)
         except Exception as e:
-            logger.error(f"Failed to init CSRT tracker: {e}")
-            self._cv_tracker = None
+            logger.error(f"YOLO backend unavailable ({e}) - falling back to saliency")
+    return SaliencyDetector(cfg)
+
+
+class ObjectDetector:
+    """
+    Click-to-track detector.
+
+    Workflow
+    ────────
+    1. User clicks a pixel on GCS.
+    2. The proposal backend runs once to find a distinct object at that spot.
+       - If found → use its centre, but cap the box to INIT_PATCH_SIZE so CSRT
+         gets a tight, specific patch.
+       - If not   → use a fixed-size patch centred on the click.
+    3. CSRT tracks that visual patch frame-by-frame.  No further proposal calls
+       during normal tracking, so nothing can cause a target switch.
+    4. If CSRT fails for max_fails×2 consecutive frames → try one re-acquisition
+       within 120 px of the last known position, then reinit CSRT.  Otherwise
+       enter SEARCHING.
+    """
+
+    STATE_SEARCHING = "searching"
+    STATE_TRACKING = "tracking"   # CSRT active
+
+    def __init__(self, cfg):
+        self.cfg = cfg
+        self.state = self.STATE_SEARCHING
+        self.last_bbox = None   # (x, y, w, h) — top-left corner + size
+        self.fail_count = 0
+        self.max_fails = cfg.get('max_detection_failures', 10)
+        # Consecutive CSRT failures tolerated before we give up and re-acquire.
+        # Frames 1..coast_limit-1 are "coasting": the box returned is the last
+        # KNOWN position, not a fresh measurement.
+        self.coast_limit = self.max_fails * 2
+        self._cv_tracker = None
+        self._tracker_type = cfg.get('fallback_tracker', 'CSRT')
+        self.proposer = make_proposer(cfg)
+
+    # ------------------------------------------------------------------ #
+    #  Public API                                                          #
+    # ------------------------------------------------------------------ #
+
+    def confidence(self):
+        """
+        How much to trust the position currently being reported, 0.0 … 1.0.
+
+        1.0  = fresh CSRT measurement this frame.
+        <1.0 = coasting on the last known box; decays linearly with the number
+               of consecutive failures.
+        0.0  = the box is as old as we are willing to act on at all.
+
+        Callers scale control commands by this so the aircraft stops
+        committing to a stale position gradually rather than either steering
+        blindly for the whole coast window or jerking to a stop on every
+        single-frame tracker hiccup.
+        """
+        if self.state != self.STATE_TRACKING or self.last_bbox is None:
+            return 0.0
+        if self.fail_count <= 0:
+            return 1.0
+        return max(0.0, 1.0 - (self.fail_count / float(self.coast_limit)))
+
+    def select_target(self, click_x, click_y, frame):
+        """Called when the user clicks on GCS.  Initialises CSRT immediately."""
+        self.state = self.STATE_SEARCHING
+        self.last_bbox = None
+        self.fail_count = 0
+        self._cv_tracker = None
+
+        # Snap to a distinct object near the click, but keep the CSRT patch a
+        # small fixed size so the tracker learns the specific region pointed at.
+        centre_x, centre_y = click_x, click_y
+        hint = self.proposer.find_nearest(frame, click_x, click_y, max_dist=80)
+        if hint is not None:
+            hx, hy, hw, hh = hint
+            centre_x = hx + hw // 2
+            centre_y = hy + hh // 2
+            logger.info(f"Proposal hint: centre ({centre_x},{centre_y}) size {hw}x{hh}")
+
+        bbox = self._make_patch(frame, centre_x, centre_y, INIT_PATCH_SIZE)
+        self._init_cv_tracker(frame, bbox)
+        if self._cv_tracker is not None:
+            self.last_bbox = bbox
+            self.state = self.STATE_TRACKING
+            logger.info(f"CSRT initialised on patch {bbox}")
+            return True
+
+        logger.error("Could not initialise any tracker")
+        return False
+
+    def process(self, frame):
+        """
+        Returns (target, state, annotated_frame).
+        target = (cx, cy, w, h) in pixels, or None if not tracking.
+        """
+        annotated = frame.copy()
+
+        if self.state == self.STATE_SEARCHING or self._cv_tracker is None:
+            return None, self.state, annotated
+
+        ok, rect = self._cv_tracker.update(frame)
+        if ok:
+            x, y, w, h = [int(v) for v in rect]
+            # Sanity-check: reject obviously degenerate boxes
+            if w > 5 and h > 5:
+                self.last_bbox = (x, y, w, h)
+                self.fail_count = 0
+            else:
+                ok = False
+
+        if not ok:
+            self.fail_count += 1
+            if self.fail_count >= self.coast_limit:
+                # Try re-acquisition near last known position
+                ref_cx, ref_cy = self._bbox_center(self.last_bbox)
+                new_bbox = self.proposer.find_nearest(frame, ref_cx, ref_cy, max_dist=120)
+                if new_bbox is not None:
+                    nx, ny, nw, nh = new_bbox
+                    centre_x = nx + nw // 2
+                    centre_y = ny + nh // 2
+                    patch = self._make_patch(frame, centre_x, centre_y, INIT_PATCH_SIZE)
+                    self._init_cv_tracker(frame, patch)
+                    self.last_bbox = patch
+                    self.fail_count = 0
+                    logger.info("Re-acquired; CSRT reinitialised")
+                else:
+                    logger.warning("Tracker lost target — entering SEARCHING")
+                    self.state = self.STATE_SEARCHING
+                    return None, self.state, annotated
+
+        # Annotate
+        if self.last_bbox:
+            x, y, w, h = self.last_bbox
+            cx = x + w // 2
+            cy = y + h // 2
+            color = (0, 200, 0) if ok else (0, 100, 255)
+            cv2.rectangle(annotated, (x, y), (x + w, y + h), color, 2)
+            cv2.circle(annotated, (cx, cy), 5, color, -1)
+            label = "TRACK" if ok else f"COAST({self.fail_count})"
+            cv2.putText(annotated, label, (x, y - 8),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
+            return (cx, cy, w, h), self.state, annotated
+
+        return None, self.state, annotated
+
+    # ------------------------------------------------------------------ #
+    #  Internal helpers                                                    #
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _make_patch(frame, cx, cy, size):
+        """Return a clamped (x, y, w, h) patch centred on (cx, cy)."""
+        h, w = frame.shape[:2]
+        half = size // 2
+        x = max(0, min(cx - half, w - size))
+        y = max(0, min(cy - half, h - size))
+        return (x, y, size, size)
+
+    def _init_cv_tracker(self, frame, bbox):
+        factories = []
+        for ns in [cv2, getattr(cv2, 'legacy', None)]:
+            if ns is None:
+                continue
+            for name in [f'Tracker{self._tracker_type}_create',
+                         'TrackerCSRT_create', 'TrackerKCF_create', 'TrackerMOSSE_create']:
+                fn = getattr(ns, name, None)
+                if fn and fn not in factories:
+                    factories.append(fn)
+        for factory in factories:
+            try:
+                t = factory()
+                t.init(frame, bbox)
+                self._cv_tracker = t
+                logger.info(f"Tracker: {factory.__name__}")
+                return
+            except Exception:
+                continue
+        logger.error("No working OpenCV tracker found")
+        self._cv_tracker = None
 
     @staticmethod
     def _bbox_center(bbox):

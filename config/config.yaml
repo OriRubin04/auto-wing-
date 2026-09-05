@@ -1,29 +1,28 @@
 camera:
-  index: 0
+  index: 1
   width: 640
   height: 480
   fps: 30
 
 mavlink:
-  connection_string: "tcp:127.0.0.1:5760"  # SITL default
+  connection_string: "tcp:127.0.0.1:5762"  # SITL SERIAL1 — free port, MP uses 5760
   baudrate: 115200
   heartbeat_timeout: 10
   takeoff_altitude: 50  # meters
 
 control:
-  # PID for roll (x-axis error)
+  # ACRO mode: outputs are RATE commands, not angle commands.
   roll_pid:
-    kp: 0.4
-    ki: 0.01
-    kd: 0.05
-    output_limit: 0.5  # max roll in radians (~28 deg)
-  # PID for pitch (y-axis error)
+    kp: 1.20
+    ki: 0.0
+    kd: 0.08
+    output_limit: 0.80
   pitch_pid:
-    kp: 0.2
-    ki: 0.005
-    kd: 0.02
-    output_limit: 0.3  # max pitch in radians (~17 deg)
-  throttle: 0.6  # constant throttle 0-1
+    kp: 0.25
+    ki: 0.0
+    kd: 0.01
+    output_limit: 0.12  # max pitch rate sent to ACRO — keep small to avoid flipping
+  throttle: 0.45  # tune this: if plane still climbs when target centered, lower it
   update_rate_hz: 20
 
 detection:
@@ -36,11 +35,11 @@ detection:
 
 streaming:
   host: "0.0.0.0"
-  port: 5000
+  port: 15000
   quality: 70  # JPEG quality 0-100
   fps_limit: 25
 
 gcs:
   onboard_ip: "127.0.0.1"  # change to Pi IP on real hardware
-  video_port: 5000
-  control_port: 5001
+  video_port: 15000
+  control_port: 15001

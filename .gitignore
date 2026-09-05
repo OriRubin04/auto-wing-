@@ -1,0 +1,33 @@
+# Python bytecode.
+# Never commit these: a stale .pyc shadowing an updated .py is what made
+# `git pull` appear to do nothing while the old code kept running.
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Model weights (downloaded on demand, not source)
+*.pt
+*.onnx
+*.param
+*.bin
+
+# Recorded footage and benchmark output — large binaries, not source
+recordings/
+*.avi
+*.mp4
+*.mkv
+
+# Logs and local scratch
+*.log
+*.csv
+.DS_Store
+.idea/
+.vscode/
+
+# Flight logs (video + telemetry) - large, generated per run
+logs/
