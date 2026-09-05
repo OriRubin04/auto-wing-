@@ -86,6 +86,10 @@ class ObjectDetector:
     STATE_SEARCHING = "searching"
     STATE_TRACKING = "tracking"   # CSRT active
 
+    TEMPLATE_DEFAULT = 32          # template side when there is no size hint
+    TEMPLATE_MIN = 24
+    TEMPLATE_SCALE = 1.5           # template side = this x largest hint side
+
     def __init__(self, cfg):
         self.cfg = cfg
         self.state = self.STATE_SEARCHING
@@ -96,6 +100,34 @@ class ObjectDetector:
         # Frames 1..coast_limit-1 are "coasting": the box returned is the last
         # KNOWN position, not a fresh measurement.
         self.coast_limit = self.max_fails * 2
+        # A CSRT "success" is not a measurement until it passes these.  CSRT
+        # almost never reports failure on its own: when the target vanishes it
+        # re-locks on whatever correlates best, which can be a frame corner
+        # 400 px away, and reports that at full confidence forever.
+        # Max centre movement between consecutive frames, in pixels.  A 60 deg
+        # lens slewing at 100 deg/s moves the image ~43 px/frame at 25 fps,
+        # so 100 px only rejects jumps no physical target can make.
+        self.max_jump_px = float(cfg.get('max_jump_px', 100))
+        # Minimum fraction of the box that must lie inside the frame.
+        self.min_visible_frac = float(cfg.get('min_visible_frac', 0.5))
+        # Re-acquisition gate.  A saliency proposal only becomes the new
+        # target if a grayscale patch there matches the template captured at
+        # selection, by normalised cross-correlation, at least this well.
+        # Measured on a synthetic vehicle: same target 0.85, rotated 45 deg
+        # 0.61, rotated 90 deg 0.47; a wrong blob on clutter ~0.0.  Without
+        # this, "nearest salient blob" always finds SOMETHING - a rock, a
+        # bush - and CSRT then tracks that at full confidence, so no lost-lock
+        # logic downstream can ever fire.
+        self.reacquire_min_ncc = float(cfg.get('reacquire_min_ncc', 0.3))
+        # NCC falls off fast with misalignment (0.15 at 15 px), so each
+        # candidate is searched over +/- this many pixels for the peak.
+        self.reacquire_search_px = int(cfg.get('reacquire_search_px', 40))
+        # The template is TARGET-sized, not CSRT-patch-sized.  A 72 px patch
+        # around a 12 px target is 97% terrain, and terrain matches terrain,
+        # so a patch-sized template happily re-acquires the ground the target
+        # used to be on.  Sized from the saliency hint at selection.
+        self._template = None
+        self._template_size = self.TEMPLATE_DEFAULT
         self._cv_tracker = None
         self._tracker_type = cfg.get('fallback_tracker', 'CSRT')
         self.proposer = make_proposer(cfg)
@@ -134,17 +166,23 @@ class ObjectDetector:
         # Snap to a distinct object near the click, but keep the CSRT patch a
         # small fixed size so the tracker learns the specific region pointed at.
         centre_x, centre_y = click_x, click_y
+        self._template_size = self.TEMPLATE_DEFAULT
         hint = self.proposer.find_nearest(frame, click_x, click_y, max_dist=80)
         if hint is not None:
             hx, hy, hw, hh = hint
             centre_x = hx + hw // 2
             centre_y = hy + hh // 2
-            logger.info(f"Proposal hint: centre ({centre_x},{centre_y}) size {hw}x{hh}")
+            self._template_size = int(max(self.TEMPLATE_MIN,
+                                          min(INIT_PATCH_SIZE,
+                                              self.TEMPLATE_SCALE * max(hw, hh))))
+            logger.info(f"Proposal hint: centre ({centre_x},{centre_y}) size {hw}x{hh} "
+                        f"-> template {self._template_size} px")
 
         bbox = self._make_patch(frame, centre_x, centre_y, INIT_PATCH_SIZE)
         self._init_cv_tracker(frame, bbox)
         if self._cv_tracker is not None:
             self.last_bbox = bbox
+            self._template = self._capture_template(frame, bbox)
             self.state = self.STATE_TRACKING
             logger.info(f"CSRT initialised on patch {bbox}")
             return True
@@ -164,29 +202,27 @@ class ObjectDetector:
 
         ok, rect = self._cv_tracker.update(frame)
         if ok:
-            x, y, w, h = [int(v) for v in rect]
-            # Sanity-check: reject obviously degenerate boxes
-            if w > 5 and h > 5:
-                self.last_bbox = (x, y, w, h)
+            bbox = tuple(int(v) for v in rect)
+            reason = self._reject_reason(frame, bbox)
+            if reason is None:
+                self.last_bbox = bbox
                 self.fail_count = 0
             else:
+                logger.debug(f"Tracker box rejected: {reason}")
                 ok = False
 
         if not ok:
             self.fail_count += 1
             if self.fail_count >= self.coast_limit:
-                # Try re-acquisition near last known position
-                ref_cx, ref_cy = self._bbox_center(self.last_bbox)
-                new_bbox = self.proposer.find_nearest(frame, ref_cx, ref_cy, max_dist=120)
-                if new_bbox is not None:
-                    nx, ny, nw, nh = new_bbox
-                    centre_x = nx + nw // 2
-                    centre_y = ny + nh // 2
+                found = self._reacquire(frame)
+                if found is not None:
+                    centre_x, centre_y, score = found
                     patch = self._make_patch(frame, centre_x, centre_y, INIT_PATCH_SIZE)
                     self._init_cv_tracker(frame, patch)
                     self.last_bbox = patch
+                    self._template = self._capture_template(frame, patch)
                     self.fail_count = 0
-                    logger.info("Re-acquired; CSRT reinitialised")
+                    logger.info(f"Re-acquired (ncc {score:.2f}); CSRT reinitialised")
                 else:
                     logger.warning("Tracker lost target — entering SEARCHING")
                     self.state = self.STATE_SEARCHING
@@ -210,6 +246,88 @@ class ObjectDetector:
     # ------------------------------------------------------------------ #
     #  Internal helpers                                                    #
     # ------------------------------------------------------------------ #
+
+    def _reacquire(self, frame):
+        """
+        Find the target again near its last known position.
+
+        Saliency proposes where something stands out; the template decides
+        whether it is OUR target.  The last known position is always a
+        candidate too, so a target that is present but not salient (low
+        contrast, partly occluded) can still be recovered.
+
+        Returns (cx, cy, ncc) for the best candidate above the gate, else None.
+        """
+        ref_cx, ref_cy = self._bbox_center(self.last_bbox)
+        cands = [(ref_cx, ref_cy)]
+        hint = self.proposer.find_nearest(frame, ref_cx, ref_cy, max_dist=120)
+        if hint is not None:
+            hx, hy, hw, hh = hint
+            cands.insert(0, (hx + hw // 2, hy + hh // 2))
+
+        if self._template is None:
+            # No template to verify against: fall back to trusting saliency.
+            return (cands[0][0], cands[0][1], 1.0) if hint is not None else None
+
+        best = None
+        for cx, cy in cands:
+            m = self._template_match(frame, cx, cy, self.reacquire_search_px)
+            if m is not None and (best is None or m[0] > best[0]):
+                best = m
+        if best is None or best[0] < self.reacquire_min_ncc:
+            logger.info(f"Re-acquisition rejected: best ncc "
+                        f"{best[0] if best else float('nan'):.2f} "
+                        f"< {self.reacquire_min_ncc:.2f}")
+            return None
+        return best[1], best[2], best[0]
+
+    def _template_match(self, frame, cx, cy, search):
+        """
+        Peak NCC of the template within +/- search px of (cx, cy).
+        Returns (ncc, peak_cx, peak_cy) or None if the window is too small.
+        """
+        th, tw = self._template.shape[:2]
+        fh, fw = frame.shape[:2]
+        x0 = max(0, int(cx) - tw // 2 - search)
+        y0 = max(0, int(cy) - th // 2 - search)
+        x1 = min(fw, int(cx) + tw // 2 + search)
+        y1 = min(fh, int(cy) + th // 2 + search)
+        if x1 - x0 < tw or y1 - y0 < th:
+            return None
+        win = cv2.cvtColor(frame[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY)
+        res = cv2.matchTemplate(win, self._template, cv2.TM_CCOEFF_NORMED)
+        _, score, _, loc = cv2.minMaxLoc(res)
+        return float(score), x0 + loc[0] + tw // 2, y0 + loc[1] + th // 2
+
+    def _capture_template(self, frame, bbox):
+        """Grayscale template of _template_size px centred on bbox."""
+        cx, cy = self._bbox_center(bbox)
+        x, y, w, h = self._make_patch(frame, cx, cy, self._template_size)
+        return cv2.cvtColor(frame[y:y + h, x:x + w], cv2.COLOR_BGR2GRAY)
+
+    def _reject_reason(self, frame, bbox):
+        """
+        Why a tracker box should NOT count as a measurement, or None if it is
+        acceptable.  All checks are geometric: no thresholds on appearance.
+        """
+        x, y, w, h = bbox
+        if w <= 5 or h <= 5:
+            return f"degenerate {w}x{h}"
+
+        fh, fw = frame.shape[:2]
+        vis_w = min(x + w, fw) - max(x, 0)
+        vis_h = min(y + h, fh) - max(y, 0)
+        visible = max(0, vis_w) * max(0, vis_h) / float(w * h)
+        if visible < self.min_visible_frac:
+            return f"only {visible:.0%} inside frame"
+
+        if self.last_bbox is not None:
+            px, py = self._bbox_center(self.last_bbox)
+            cx, cy = self._bbox_center(bbox)
+            jump = ((cx - px) ** 2 + (cy - py) ** 2) ** 0.5
+            if jump > self.max_jump_px:
+                return f"jumped {jump:.0f} px in one frame"
+        return None
 
     @staticmethod
     def _make_patch(frame, cx, cy, size):
