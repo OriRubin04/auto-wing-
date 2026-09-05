@@ -37,9 +37,12 @@ class TrackingSystem:
 
         cam_cfg = cfg['camera']
         cam_index = cam_cfg['index']
-        self.cap = self._open_camera(cam_index, cam_cfg)
-        self.frame_w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or cam_cfg['width']
-        self.frame_h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or cam_cfg['height']
+        self.cap, first_frame = self._open_camera(cam_index, cam_cfg)
+        # Take the size from a real frame.  cap.get() can report the requested
+        # mode rather than the delivered one, and if the two disagree the HUD
+        # crosshair (drawn from frame.shape) and the control error (normalised
+        # against these) would silently reference different centres.
+        self.frame_h, self.frame_w = first_frame.shape[:2]
         logger.info(f"Camera opened: index={cam_index} resolution={self.frame_w}x{self.frame_h}")
 
         self.detector = ObjectDetector(cfg['detection'])
@@ -51,7 +54,8 @@ class TrackingSystem:
         stream_cfg = cfg['streaming']
         self.streamer = VideoStreamer(
             stream_cfg['host'], stream_cfg['port'],
-            stream_cfg['quality'], stream_cfg['fps_limit']
+            stream_cfg['quality'], stream_cfg['fps_limit'],
+            max_width=stream_cfg.get('max_width', 640),
         )
         self.control_server = ControlServer(cfg['gcs']['control_port'])
 
@@ -77,22 +81,47 @@ class TrackingSystem:
 
     @staticmethod
     def _open_camera(index, cam_cfg):
-        backends = [cv2.CAP_DSHOW, cv2.CAP_MSMF, cv2.CAP_ANY]
+        """
+        Open the camera and return (cap, first_frame).
+
+        Settings are applied BEFORE the warm-up read, and the caller takes the
+        real resolution from the returned frame rather than from cap.get(),
+        which can report the requested mode rather than the delivered one.
+        """
+        if sys.platform.startswith('win'):
+            backends = [cv2.CAP_DSHOW, cv2.CAP_MSMF, cv2.CAP_ANY]
+        else:
+            backends = [cv2.CAP_V4L2, cv2.CAP_ANY]
+
+        want_w, want_h = cam_cfg['width'], cam_cfg['height']
         for backend in backends:
             cap = cv2.VideoCapture(index, backend)
             if not cap.isOpened():
                 cap.release()
                 continue
-            for _ in range(5):
+            # MJPEG first: uncompressed YUYV at 720p is ~442 Mbps, well over
+            # practical USB 2.0, and the driver silently drops to ~5 fps
+            # instead of reporting an error.
+            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, want_w)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, want_h)
+            cap.set(cv2.CAP_PROP_FPS, cam_cfg['fps'])
+            # Keep only the newest frame: a queued buffer adds pure latency
+            # to a control loop.
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
+            for _ in range(5):                      # warm up
                 cap.read()
                 time.sleep(0.05)
             ret, frame = cap.read()
             if ret and frame is not None:
-                cap.set(cv2.CAP_PROP_FRAME_WIDTH, cam_cfg['width'])
-                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, cam_cfg['height'])
-                cap.set(cv2.CAP_PROP_FPS, cam_cfg['fps'])
-                logger.info(f"Camera backend: {backend}")
-                return cap
+                got_h, got_w = frame.shape[:2]
+                logger.info(f"Camera backend: {backend}  delivering {got_w}x{got_h}")
+                if (got_w, got_h) != (want_w, want_h):
+                    logger.warning(
+                        f"Camera gave {got_w}x{got_h}, not the requested "
+                        f"{want_w}x{want_h} - using what it actually delivers.")
+                return cap, frame
             cap.release()
         raise RuntimeError(
             f"Cannot read from camera index {index}.\n"
@@ -112,7 +141,7 @@ class TrackingSystem:
                     self.cap.release()
                     time.sleep(1.0)
                     try:
-                        self.cap = self._open_camera(
+                        self.cap, _ = self._open_camera(
                             self.cfg['camera']['index'], self.cfg['camera'])
                         cam_fail_count = 0
                         logger.info("Camera reopened successfully")
@@ -178,9 +207,14 @@ class TrackingSystem:
     def _handle_gcs_message(self, msg, frame):
         action = msg.get('action')
         if action == 'select':
-            cx = msg.get('x', self.frame_w // 2)
-            cy = msg.get('y', self.frame_h // 2)
-            logger.info(f"GCS selected target at ({cx}, {cy})")
+            # The GCS clicks in STREAM pixels, which may be a downscaled copy
+            # of the frame we actually process.  Map back before using them.
+            scale = self.streamer.last_scale or 1.0
+            cx = int(msg.get('x', self.frame_w * scale // 2) / scale)
+            cy = int(msg.get('y', self.frame_h * scale // 2) / scale)
+            cx = max(0, min(cx, self.frame_w - 1))
+            cy = max(0, min(cy, self.frame_h - 1))
+            logger.info(f"GCS selected target at ({cx}, {cy}) [stream scale {scale:.3f}]")
             self.mav.set_acro_mode()
             ok = self.detector.select_target(cx, cy, frame)
             self.controller.reset()
