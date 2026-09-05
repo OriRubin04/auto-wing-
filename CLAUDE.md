@@ -71,8 +71,30 @@ be ~2 s old.
 Attitude-based wing levelling is deliberately **not** derated — it comes from a
 live `ATTITUDE` reading, not from tracker pixels.
 
-Lost-lock currently snaps to `roll=0`. Switching it to RTL was considered and
-deferred.
+**A CSRT "success" is not a measurement until it passes validity checks.**
+CSRT almost never reports failure on its own: when the target vanishes it
+re-locks on whatever correlates best (measured: a frame corner 420 px away,
+half outside the frame) and reports that at full confidence forever. So the
+detector rejects a box that jumps more than `max_jump_px` (100) in one frame or
+is less than `min_visible_frac` (0.5) inside the frame, and treats the
+rejection as a tracker failure. Any lost-lock logic downstream is blind
+without this.
+
+**Re-acquisition is template-verified.** "Nearest salient blob" always finds
+something — a rock, a bush — so a proposal only becomes the target if a
+grayscale template captured at selection matches there by NCC ≥
+`reacquire_min_ncc` (0.3). Measured on a synthetic vehicle: same target 0.85,
+rotated 90° 0.47, wrong blob ≈ 0. The template is **target-sized** (1.5× the
+saliency hint, 24–72 px), not CSRT-patch-sized: a 72 px patch around a 12 px
+target is 97% terrain, and terrain matches terrain.
+
+Lost-lock has an onboard ending. While the target is missing, the loop levels
+the wings from `ATTITUDE` (not `roll=0`, which in ACRO would hold the bank the
+target was lost in). After `control.lost_timeout_s` (default 3.0 s) without a
+fresh CSRT measurement, the aircraft releases the override and goes to RTL by
+itself. The clock runs from the last *real* measurement, so the coast window
+counts against it. This is the same path as a GCS stop, and it is what makes
+rule 1 hold after a loss: before it, only the GCS could ever end tracking.
 
 ## 5. Detection is class-agnostic
 

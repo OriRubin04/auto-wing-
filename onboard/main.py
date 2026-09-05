@@ -67,6 +67,14 @@ class TrackingSystem:
 
         self.update_interval = 1.0 / cfg['control']['update_rate_hz']
 
+        # Lost-lock watchdog.  Seconds without a FRESH tracker measurement
+        # before the aircraft gives up on its own and goes to RTL.  Measured
+        # from the last real CSRT hit, so the coast window counts against it.
+        # This is what makes the "link may be dead" rule hold after a loss:
+        # without it, only a GCS stop could ever end tracking.
+        self.lost_timeout = float(cfg['control'].get('lost_timeout_s', 3.0))
+        self._last_lock_t = None
+
     def start(self):
         logger.info("Connecting to flight controller...")
         self.mav.connect()
@@ -149,6 +157,9 @@ class TrackingSystem:
                         logger.error(str(e))
                 else:
                     time.sleep(0.05)
+                # No frame means no lock.  The watchdog must keep running
+                # here too, or a dead camera would hold ACRO forever.
+                self._check_lost_lock(time.time())
                 continue
             cam_fail_count = 0
             loop_t0 = time.time()
@@ -172,15 +183,17 @@ class TrackingSystem:
             self.streamer.send_frame(annotated)
 
             now = time.time()
+            if self.tracking and target is not None and self.detector.fail_count == 0:
+                self._last_lock_t = now
+
             if now - last_update >= self.update_interval:
                 last_update = now
                 if target is not None and self.tracking:
                     self._send_control(target)
                 elif self.tracking and target is None:
-                    # Lost target while tracking in ACRO: hold level sticks, motor off
-                    self.mav.send_rc_override(0.0, 0.0, self.ACRO_THROTTLE)
-                    self._last_cmd = (0.0, 0.0, self.ACRO_THROTTLE)
-                    self._last_err = (0.0, 0.0)
+                    self._send_lost_control()
+
+            self._check_lost_lock(now)
 
             # Log the RAW frame (no HUD): annotations can be regenerated from
             # flight.csv, but they cannot be removed from burned-in pixels.
@@ -201,6 +214,7 @@ class TrackingSystem:
                 'bank_rad': f"{self._last_bank_rad:.4f}",
                 'fail_count': self.detector.fail_count,
                 'confidence': f"{self.detector.confidence():.3f}",
+                'lost_s': f"{self._seconds_lost(now):.2f}",
                 'loop_ms': f"{(time.time() - loop_t0) * 1000:.2f}",
             })
 
@@ -219,15 +233,52 @@ class TrackingSystem:
             ok = self.detector.select_target(cx, cy, frame)
             self.controller.reset()
             self.tracking = True
+            self._last_lock_t = time.time()
             self.flight_log.log_event('target_select', x=cx, y=cy, ok=bool(ok),
                                       bbox=self.detector.last_bbox)
         elif action == 'stop':
             logger.info("GCS stop command - switching to RTL")
-            self.tracking = False
-            self.detector.state = self.detector.STATE_SEARCHING
-            self.mav.release_rc_override()
-            self.mav.set_rtl_mode()
-            self.flight_log.log_event('stop_rtl')
+            self._stop_tracking('stop_rtl')
+
+    def _stop_tracking(self, event, **data):
+        """
+        End tracking and hand the aircraft back to ArduPilot in RTL.
+
+        Shared by the GCS stop command and the onboard lost-lock watchdog, so
+        both paths do exactly the same thing: clear the tracking flag, release
+        the RC override (ArduPilot owns throttle again) and request RTL.
+        """
+        self.tracking = False
+        self._last_lock_t = None
+        self.detector.state = self.detector.STATE_SEARCHING
+        self.mav.release_rc_override()
+        self.mav.set_rtl_mode()
+        self._last_cmd = (0.0, 0.0, 0.0)
+        self._last_err = (0.0, 0.0)
+        self.flight_log.log_event(event, **data)
+
+    def _seconds_lost(self, now):
+        """Seconds since the last fresh tracker measurement, or 0 if locked."""
+        if not self.tracking or self._last_lock_t is None:
+            return 0.0
+        return max(0.0, now - self._last_lock_t)
+
+    def _check_lost_lock(self, now):
+        """
+        Onboard watchdog: no fresh lock for lost_timeout seconds -> RTL.
+
+        This decision is made here, on the aircraft, with no GCS involved.
+        A lost target is the normal failure of visual tracking from altitude
+        (occlusion, lighting, the target leaving the frame during a bank) and
+        must have an ending that does not depend on the radio link.
+        """
+        lost = self._seconds_lost(now)
+        if lost >= self.lost_timeout:
+            logger.warning(
+                f"Lost lock for {lost:.1f} s (limit {self.lost_timeout:.1f} s) "
+                f"- aborting to RTL")
+            self._stop_tracking('lost_lock_rtl', lost_s=round(lost, 2),
+                                fail_count=self.detector.fail_count)
 
     LEVEL_KP = 0.3          # bank angle (rad) -> roll rate command
     LEVEL_DEADBAND = 0.05   # ignore bank angles smaller than ~3 deg
@@ -258,10 +309,7 @@ class TrackingSystem:
         # reading rather than from tracker pixels, and levelling is the safe
         # thing to be doing when we are unsure where the target is.
         if abs(error_x) < self.controller.DEADBAND:
-            if abs(self._last_bank_rad) > self.LEVEL_DEADBAND:
-                roll = float(max(-0.5, min(0.5, -self.LEVEL_KP * self._last_bank_rad)))
-            else:
-                roll = 0.0
+            roll = self._level_roll()
 
         self.mav.send_rc_override(roll, pitch, throttle)
         self._last_cmd = (roll, pitch, throttle)
@@ -272,12 +320,36 @@ class TrackingSystem:
             f"roll={roll:+.2f}  pitch={pitch:+.2f}  thr={throttle:.2f}"
         )
 
+    def _level_roll(self):
+        """Roll-rate command that brings the cached bank angle back to zero."""
+        if abs(self._last_bank_rad) > self.LEVEL_DEADBAND:
+            return float(max(-0.5, min(0.5, -self.LEVEL_KP * self._last_bank_rad)))
+        return 0.0
+
+    def _send_lost_control(self):
+        """
+        Sticks while tracking with no target: level the wings, motor off.
+
+        In ACRO a zero roll stick HOLDS the current bank, so the old
+        roll=0 here left the aircraft in whatever bank it lost the target
+        in, gliding.  Levelling uses the live ATTITUDE cache, not tracker
+        pixels, so it is exactly as valid here as when the target is centred.
+        """
+        roll = self._level_roll()
+        self.mav.send_rc_override(roll, 0.0, self.ACRO_THROTTLE)
+        self._last_cmd = (roll, 0.0, self.ACRO_THROTTLE)
+        self._last_err = (0.0, 0.0)
+
     def _draw_hud(self, frame, target, state):
         h, w = frame.shape[:2]
         cv2.line(frame, (w//2 - 20, h//2), (w//2 + 20, h//2), (255, 255, 255), 1)
         cv2.line(frame, (w//2, h//2 - 20), (w//2, h//2 + 20), (255, 255, 255), 1)
         status_color = (0, 255, 0) if self.tracking else (0, 0, 255)
         status = f"{'TRACKING' if self.tracking else 'STANDBY'} | {state.upper()}"
+        lost = self._seconds_lost(time.time())
+        if self.tracking and lost > 0.0 and target is None:
+            status_color = (0, 165, 255)
+            status += f" | LOST {lost:.1f}/{self.lost_timeout:.0f}s"
         cv2.putText(frame, status, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, status_color, 2)
         if target:
             cx, cy = target[0], target[1]
