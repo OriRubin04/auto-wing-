@@ -1,20 +1,68 @@
 import cv2
-import math
 import logging
 
-logger = logging.getLogger(__name__)
+from onboard.saliency import SaliencyDetector
 
-try:
-    from ultralytics import YOLO
-    YOLO_AVAILABLE = True
-except ImportError:
-    YOLO_AVAILABLE = False
-    logger.warning("ultralytics not installed — YOLO unavailable")
+logger = logging.getLogger(__name__)
 
 
 # Size of the patch CSRT is initialised on, in pixels.
 # Smaller = more specific (less likely to drift); bigger = more texture = more stable.
 INIT_PATCH_SIZE = 72
+
+
+class YoloProposer:
+    """
+    Optional YOLO proposal backend.
+
+    Kept so the saliency swap can be A/B'd or reverted, but no longer a hard
+    dependency - `ultralytics` (and the ~2 GB of PyTorch behind it) is imported
+    lazily and only when detection.backend is explicitly set to "yolo".
+    """
+
+    def __init__(self, cfg):
+        from ultralytics import YOLO      # lazy: not required for the default path
+        self.cfg = cfg
+        self.model = YOLO(cfg.get('model', 'yolov8n.pt'))
+        logger.info("Proposal backend: YOLO")
+
+    def find_nearest(self, frame, ref_x, ref_y, max_dist=None):
+        """Nearest YOLO detection to (ref_x, ref_y), optional distance gate."""
+        try:
+            results = self.model(
+                frame,
+                conf=self.cfg.get('confidence', 0.4),
+                iou=self.cfg.get('iou', 0.45),
+                device=self.cfg.get('device', 'cpu'),
+                verbose=False
+            )
+            best, best_dist = None, float('inf')
+            for r in results:
+                for box in r.boxes:
+                    x1, y1, x2, y2 = [int(v) for v in box.xyxy[0]]
+                    cx = (x1 + x2) // 2
+                    cy = (y1 + y2) // 2
+                    d = ((cx - ref_x) ** 2 + (cy - ref_y) ** 2) ** 0.5
+                    if d < best_dist:
+                        best_dist = d
+                        best = (x1, y1, x2 - x1, y2 - y1)
+            if best is not None and max_dist is not None and best_dist > max_dist:
+                return None
+            return best
+        except Exception as e:
+            logger.error(f"YOLO error: {e}")
+            return None
+
+
+def make_proposer(cfg):
+    """Build the object-proposal backend named by detection.backend."""
+    backend = str(cfg.get('backend', 'saliency')).lower()
+    if backend == 'yolo':
+        try:
+            return YoloProposer(cfg)
+        except Exception as e:
+            logger.error(f"YOLO backend unavailable ({e}) - falling back to saliency")
+    return SaliencyDetector(cfg)
 
 
 class ObjectDetector:
@@ -24,36 +72,29 @@ class ObjectDetector:
     Workflow
     ────────
     1. User clicks a pixel on GCS.
-    2. YOLO runs once to find if a known object is at that location.
-       - If yes → use the YOLO detection centre, but cap the box to INIT_PATCH_SIZE
-         so CSRT gets a tight, specific patch rather than a "whole person" box.
-       - If no  → use a fixed-size patch centred on the click.
-    3. CSRT tracks that visual patch frame-by-frame.  No further YOLO calls during
-       normal tracking — YOLO detecting other objects won't cause target switches.
-    4. If CSRT fails for max_fails×2 consecutive frames → try one YOLO re-acquisition
-       within 120 px of the last known position, then reinit CSRT.  Otherwise enter
-       SEARCHING.
+    2. The proposal backend runs once to find a distinct object at that spot.
+       - If found → use its centre, but cap the box to INIT_PATCH_SIZE so CSRT
+         gets a tight, specific patch.
+       - If not   → use a fixed-size patch centred on the click.
+    3. CSRT tracks that visual patch frame-by-frame.  No further proposal calls
+       during normal tracking, so nothing can cause a target switch.
+    4. If CSRT fails for max_fails×2 consecutive frames → try one re-acquisition
+       within 120 px of the last known position, then reinit CSRT.  Otherwise
+       enter SEARCHING.
     """
 
     STATE_SEARCHING = "searching"
-    STATE_TRACKING  = "tracking"   # CSRT active
+    STATE_TRACKING = "tracking"   # CSRT active
 
     def __init__(self, cfg):
         self.cfg = cfg
-        self.model = None
         self.state = self.STATE_SEARCHING
         self.last_bbox = None   # (x, y, w, h) — top-left corner + size
         self.fail_count = 0
         self.max_fails = cfg.get('max_detection_failures', 10)
         self._cv_tracker = None
         self._tracker_type = cfg.get('fallback_tracker', 'CSRT')
-
-        if YOLO_AVAILABLE:
-            try:
-                self.model = YOLO(cfg.get('model', 'yolov8n.pt'))
-                logger.info("YOLO model loaded")
-            except Exception as e:
-                logger.error(f"YOLO load failed: {e}")
+        self.proposer = make_proposer(cfg)
 
     # ------------------------------------------------------------------ #
     #  Public API                                                          #
@@ -66,17 +107,15 @@ class ObjectDetector:
         self.fail_count = 0
         self._cv_tracker = None
 
-        # Try YOLO to get the object centre, but use a small fixed patch for CSRT
-        # so the tracker learns the specific visual region the user pointed at.
+        # Snap to a distinct object near the click, but keep the CSRT patch a
+        # small fixed size so the tracker learns the specific region pointed at.
         centre_x, centre_y = click_x, click_y
-        if self.model is not None:
-            yolo_bbox = self._yolo_nearest(frame, click_x, click_y, max_dist=80)
-            if yolo_bbox is not None:
-                # Use the YOLO detection centre, not the click
-                yx, yy, yw, yh = yolo_bbox
-                centre_x = yx + yw // 2
-                centre_y = yy + yh // 2
-                logger.info(f"YOLO hint: detection centre ({centre_x},{centre_y})")
+        hint = self.proposer.find_nearest(frame, click_x, click_y, max_dist=80)
+        if hint is not None:
+            hx, hy, hw, hh = hint
+            centre_x = hx + hw // 2
+            centre_y = hy + hh // 2
+            logger.info(f"Proposal hint: centre ({centre_x},{centre_y}) size {hw}x{hh}")
 
         bbox = self._make_patch(frame, centre_x, centre_y, INIT_PATCH_SIZE)
         self._init_cv_tracker(frame, bbox)
@@ -112,9 +151,9 @@ class ObjectDetector:
         if not ok:
             self.fail_count += 1
             if self.fail_count >= self.max_fails * 2:
-                # Try YOLO re-acquisition near last known position
+                # Try re-acquisition near last known position
                 ref_cx, ref_cy = self._bbox_center(self.last_bbox)
-                new_bbox = self._yolo_nearest(frame, ref_cx, ref_cy, max_dist=120)
+                new_bbox = self.proposer.find_nearest(frame, ref_cx, ref_cy, max_dist=120)
                 if new_bbox is not None:
                     nx, ny, nw, nh = new_bbox
                     centre_x = nx + nw // 2
@@ -123,7 +162,7 @@ class ObjectDetector:
                     self._init_cv_tracker(frame, patch)
                     self.last_bbox = patch
                     self.fail_count = 0
-                    logger.info("YOLO re-acquired; CSRT reinitialised")
+                    logger.info("Re-acquired; CSRT reinitialised")
                 else:
                     logger.warning("Tracker lost target — entering SEARCHING")
                     self.state = self.STATE_SEARCHING
@@ -156,35 +195,6 @@ class ObjectDetector:
         x = max(0, min(cx - half, w - size))
         y = max(0, min(cy - half, h - size))
         return (x, y, size, size)
-
-    def _yolo_nearest(self, frame, ref_x, ref_y, max_dist=None):
-        """Nearest YOLO detection to (ref_x, ref_y), optional distance gate."""
-        if self.model is None:
-            return None
-        try:
-            results = self.model(
-                frame,
-                conf=self.cfg.get('confidence', 0.4),
-                iou=self.cfg.get('iou', 0.45),
-                device=self.cfg.get('device', 'cpu'),
-                verbose=False
-            )
-            best, best_dist = None, float('inf')
-            for r in results:
-                for box in r.boxes:
-                    x1, y1, x2, y2 = [int(v) for v in box.xyxy[0]]
-                    cx = (x1 + x2) // 2
-                    cy = (y1 + y2) // 2
-                    d = ((cx - ref_x) ** 2 + (cy - ref_y) ** 2) ** 0.5
-                    if d < best_dist:
-                        best_dist = d
-                        best = (x1, y1, x2 - x1, y2 - y1)
-            if best is not None and max_dist is not None and best_dist > max_dist:
-                return None
-            return best
-        except Exception as e:
-            logger.error(f"YOLO error: {e}")
-            return None
 
     def _init_cv_tracker(self, frame, bbox):
         factories = []

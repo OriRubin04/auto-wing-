@@ -1,5 +1,8 @@
 pymavlink>=2.4.40
 opencv-contrib-python>=4.8.0
 numpy>=1.24.0
-ultralytics>=8.0.0
 pyyaml>=6.0
+
+# Optional: only needed if you set detection.backend: "yolo" in config.yaml.
+# Pulls in PyTorch (~2 GB) and is not required for the default saliency backend.
+# ultralytics>=8.0.0
