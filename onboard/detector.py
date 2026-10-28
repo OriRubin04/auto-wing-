@@ -7,16 +7,41 @@ from onboard.trackers import make_tracker
 logger = logging.getLogger(__name__)
 
 
-# Size of the patch the tracker is initialised on, in pixels.
-# Smaller = more specific (less likely to drift); bigger = more texture = more stable.
+# The init box is sized from the target, not fixed.
 #
-# Tuned for CSRT, which matches raw pixels and benefits from surrounding
-# texture.  The deep tracker wants the opposite - it squeezes the init box into
-# a fixed-size template, so 72 px around a 10 px target spends almost the whole
-# template on background.  Shrinking this is worth doing and is deliberately
-# NOT part of the backend swap: it changes target *selection*, and one change
-# at a time is how we stay able to tell what broke.
-INIT_PATCH_SIZE = 72
+# This used to be a flat 72 px and that was the single worst thing in the
+# tracking path.  Measured across 5 terrains x 2 motion profiles: with a 72 px
+# box, EVERY tracker - CSRT, KCF, MOSSE, Nano, ViT, DaSiamRPN - loses a 10 px
+# target within ~20 frames, and they all drift at exactly the aircraft's ground
+# speed in pixels/frame.  That number is the diagnosis: they are tracking the
+# terrain inside the box, not the target.  An 8 px target is 0.57% of a 72x72
+# patch, so the correlation peak belongs to the ground.
+#
+# Scaling the box to the target instead takes CSRT from 1% to 75% lock survival
+# at 8 px, with no change of tracker.  That is a bigger win than any model swap
+# and it helps whichever backend is running.
+#
+# The benchmark's best box was ~2.5x the target's true footprint.  The scale
+# below is 1.25, and the difference is not a disagreement - it is that we do
+# not know the true footprint.  We have the saliency hint, which is already an
+# inflated estimate: measured against known target sizes, the DoG response
+# cannot resolve below its own filter scale and bottoms out around 20 px.
+#
+#   true target   6    8   10   14   20   28   40   60
+#   hint         26   24   20   19   26   35   47   65
+#   ratio      4.3x 3.0x 2.0x 1.4x 1.4x 1.3x 1.2x 1.1x
+#
+# So 2.5x the *hint* is 5x the small targets we actually fly against, which is
+# most of the old problem back again.  1.25x the hint lands the box at roughly
+# 1.4-2.5x the true target across the whole range.  Do not "restore" this to
+# 2.5 from reading the benchmark without also replacing the size estimator.
+INIT_BOX_SCALE = 1.25    # box edge = this x the proposal's *hint*, not the target
+INIT_BOX_MIN = 24        # the hint floor is ~20 px; below this nothing locks
+INIT_BOX_MAX = 96        # a close, large target should not swallow the frame
+
+# Used only when the proposer finds nothing at the click, so we have no size
+# estimate at all.  A guess, and deliberately far below the old 72.
+INIT_PATCH_FALLBACK = 40
 
 
 class YoloProposer:
@@ -81,9 +106,10 @@ class ObjectDetector:
     ────────
     1. User clicks a pixel on GCS.
     2. The proposal backend runs once to find a distinct object at that spot.
-       - If found → use its centre, but cap the box to INIT_PATCH_SIZE so the
-         tracker gets a tight, specific patch.
-       - If not   → use a fixed-size patch centred on the click.
+       - If found → use its centre AND its size, so the box is scaled to the
+         target rather than to a constant.  See INIT_BOX_SCALE: this is the
+         single biggest lever in the whole tracking path.
+       - If not   → INIT_PATCH_FALLBACK, centred on the click.
     3. The primary tracker follows that visual patch frame-by-frame.  No further
        proposal calls during normal tracking, so nothing can cause a target
        switch.
@@ -140,6 +166,12 @@ class ObjectDetector:
         # onto.  A best-effort continuation is not a fresh lock, and the
         # aircraft should not commit to it as if it were.
         self.degraded_confidence = float(cfg.get('degraded_confidence', 0.60))
+
+        # Init box geometry — see INIT_BOX_SCALE for why this is not a constant.
+        self.box_scale = float(cfg.get('init_box_scale', INIT_BOX_SCALE))
+        self.box_min = int(cfg.get('init_box_min', INIT_BOX_MIN))
+        self.box_max = int(cfg.get('init_box_max', INIT_BOX_MAX))
+        self.box_fallback = int(cfg.get('init_patch_size', INIT_PATCH_FALLBACK))
 
         self.proposer = make_proposer(cfg)
 
@@ -202,7 +234,7 @@ class ObjectDetector:
             centre_y = hy + hh // 2
             logger.info(f"Proposal hint: centre ({centre_x},{centre_y}) size {hw}x{hh}")
 
-        bbox = self._make_patch(frame, centre_x, centre_y, INIT_PATCH_SIZE)
+        bbox = self._make_patch(frame, centre_x, centre_y, self._box_size(hint))
 
         if self._start(frame, bbox, self._primary):
             self.last_bbox = bbox
@@ -257,7 +289,8 @@ class ObjectDetector:
                         nx, ny, nw, nh = new_bbox
                         centre_x = nx + nw // 2
                         centre_y = ny + nh // 2
-                        patch = self._make_patch(frame, centre_x, centre_y, INIT_PATCH_SIZE)
+                        patch = self._make_patch(frame, centre_x, centre_y,
+                                                 self._box_size(new_bbox))
                         self._start(frame, patch, self._tracker)
                         self.last_bbox = patch
                         self.fail_count = 0
@@ -290,10 +323,24 @@ class ObjectDetector:
     #  Internal helpers                                                    #
     # ------------------------------------------------------------------ #
 
+    def _box_size(self, hint):
+        """
+        Edge length for the init box, scaled to the proposal's target footprint.
+
+        `hint` is the proposer's (x, y, w, h) or None.  With no hint we have no
+        size estimate at all and have to guess; with one, the box tracks the
+        target's own size, which is what keeps the terrain out of the patch.
+        """
+        if hint is None:
+            return self.box_fallback
+        edge = int(round(self.box_scale * max(hint[2], hint[3])))
+        return max(self.box_min, min(edge, self.box_max))
+
     @staticmethod
     def _make_patch(frame, cx, cy, size):
         """Return a clamped (x, y, w, h) patch centred on (cx, cy)."""
         h, w = frame.shape[:2]
+        size = max(1, min(int(size), w, h))   # a box bigger than the frame is not a box
         half = size // 2
         x = max(0, min(cx - half, w - size))
         y = max(0, min(cy - half, h - size))

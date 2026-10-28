@@ -3,25 +3,35 @@ trackers.py - single-object tracker backends.
 
 Every backend answers the same question: "here is a patch the operator picked;
 where is that same patch in this frame?"  Nothing here detects or classifies
-anything - see CLAUDE.md §5 (class-agnostic) and §7 (this split).  The operator
+anything - see CLAUDE.md §5 (class-agnostic) and §8 (this split).  The operator
 supplies the target; these only follow it.
 
-Two backends, and the difference that matters is not speed:
+Two backends:
+
+  PixelTracker  OpenCV's correlation filter (CSRT).  Matches raw pixels.  The
+                default, and the fallback.  No score at all:
+                cv2.TrackerCSRT.getTrackingScore() returns -1.0
+                unconditionally - the method exists but is not implemented.
 
   VitTracker    a small transformer (715 KB ONNX).  Learned what makes two
-                crops "the same object" across frames, so it survives lighting
-                changes and rotation that break a raw-pixel match.  Crucially,
-                `update()` also yields a real 0..1 match score.
+                crops "the same object" across frames rather than matching raw
+                pixels, and it is the only backend here whose `update()` yields
+                a real 0..1 score.  Opt-in, not default - see make_tracker.
 
-  PixelTracker  OpenCV's correlation filter (CSRT).  Matches raw pixels.  This
-                is what the system used exclusively until now, and it is the
-                fallback.  It has no usable score: cv2.TrackerCSRT's
-                getTrackingScore() returns -1.0 unconditionally - the method
-                exists but is not implemented.
+A note on why, because the obvious argument is wrong and was believed here for
+a while: a fallback can only fire if the primary can say "I have lost it", and
+ViT's score is the only candidate signal.  But measured, that signal is weak
+(AUC ~0.70) and worse, it is weak in the way that matters.  When the tracker
+drifts onto a distractor - the realistic failure, far more common than a target
+vanishing - the score dips during the transition and then CLIMBS BACK as the
+tracker grows confident about the wrong object.  It flags the moment of loss,
+not the state of being lost.  Nano's score is outright useless (higher when
+wrong than when right).
 
-That score asymmetry is the whole reason ViT is primary.  A fallback can only
-fire if the primary is able to say "I have lost it", and only one of these two
-can say it.  Everything else - the speed, the accuracy - is secondary.
+So the fallback is NOT score-driven.  It fires on consecutive update()
+failures, the mechanism that was already there, and the score only derates
+confidence and goes into the log.  Lost-lock recovery belongs to
+SaliencyDetector re-acquisition, not to any tracker's self-report.
 
 Interface (deliberately the same shape OpenCV already uses, so the detector
 does not care which one it holds):
@@ -191,7 +201,13 @@ def make_tracker(cfg):
     """
     pixels = PixelTracker(cfg.get('fallback_tracker', 'CSRT'))
 
-    backend = str(cfg.get('tracker_backend', 'vit')).lower()
+    # Default is pixels, NOT ViT.  Measured across 5 terrains at 8/12/20 px on
+    # target, ViT is the worst of the deep trackers in exactly our size range:
+    # 197/118/137 px median error, 3-10% lock survival, lost in 10 of 10 runs.
+    # It is kept selectable because it is the only one whose score carries any
+    # information at all, and because it is far better on a tight box than on a
+    # loose one - but it does not get to be the default on that.
+    backend = str(cfg.get('tracker_backend', 'csrt')).lower()
     if backend in ('vit', 'vittrack'):
         try:
             vit = VitTracker(cfg.get('vit_model', DEFAULT_VIT_MODEL),

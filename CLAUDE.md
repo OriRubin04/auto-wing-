@@ -105,59 +105,97 @@ Below ~8 px nothing works, and that is not fixable in software. Resolution and
 lens FOV buy more altitude than any model change. People (~0.5 m) are not
 achievable at these altitudes; vehicles are.
 
-## 7. Tracking: deep primary, pixels as the fallback
+## 7. The init box matters more than the tracker
 
-`onboard/trackers.py` holds two backends behind one interface. `detection.
-tracker_backend` picks the primary (default `vit`); `csrt` forces pixels only.
+This is the most useful thing measured so far, and it was found only after
+betting wrongly on the opposite.
 
-| | reports a score? |
-|---|---|
-| `cv2.TrackerVit` — 715 KB transformer, primary | **yes, 0…1** |
-| `cv2.TrackerCSRT` — correlation filter, fallback | no |
+With the old flat `INIT_PATCH_SIZE = 72`, **every** tracker tested — CSRT, KCF,
+MOSSE, Nano, ViT, DaSiamRPN — loses a 10 px target within ~20 frames. The
+diagnosis is in one number: they all drift at exactly the aircraft's ground
+speed in px/frame, i.e. **they are tracking the terrain inside the box.** An
+8 px target is 0.57% of a 72×72 patch, so the correlation peak belongs to the
+ground. Scaling the box to the target takes CSRT from 1% to 75% lock survival
+at 8 px *with no change of tracker* — a bigger win than any model swap, and it
+helps whichever backend runs.
 
-**The score is the reason ViT is primary, not the speed and not the accuracy.**
-A fallback can only fire if the primary can say "I have lost it".
-`cv2.TrackerCSRT.getTrackingScore()` returns `-1.0` unconditionally — the method
-exists but is not implemented — so a CSRT-only system cannot know when to
-degrade. NanoTrack is faster than both and was rejected for the same reason: its
-score barely separates present from absent, and `update()` always returns true.
+So the box is sized from the proposal now (`_box_size`), not from a constant.
+
+**`INIT_BOX_SCALE` is 1.25, not the benchmark's best 2.5, and that is not a
+disagreement.** The benchmark scaled the target's *true* footprint. We only
+have the saliency hint, which is itself inflated — the DoG response cannot
+resolve below its filter scale and bottoms out near 20 px:
+
+| true target | 6 | 8 | 10 | 14 | 20 | 28 | 40 | 60 |
+|---|---|---|---|---|---|---|---|---|
+| saliency hint | 26 | 24 | 20 | 19 | 26 | 35 | 47 | 65 |
+| inflation | 4.3× | 3.0× | 2.0× | 1.4× | 1.4× | 1.3× | 1.2× | 1.1× |
+
+2.5× the *hint* is 5× the small targets we actually fly against. 1.25× lands
+the box at 1.4–2.5× the true target across the range. Do not "restore" 2.5 from
+reading the benchmark without replacing the size estimator too.
+
+## 8. Tracking backends, and the argument that did not survive
+
+`onboard/trackers.py` holds two backends behind one interface.
+`detection.tracker_backend` picks the primary — **default `csrt`**, with `vit`
+opt-in.
+
+The tempting argument, which was believed here and acted on: a fallback can
+only fire if the primary can say "I have lost it"; `cv2.TrackerCSRT.
+getTrackingScore()` returns `-1.0` unconditionally (exists, not implemented);
+ViT is the only backend reporting a real score; therefore ViT must be primary.
+
+Both halves failed measurement:
+
+- **ViT is the worst deep tracker in our size range.** Across 5 terrains at
+  8/12/20 px: 197/118/137 px median error, 3–10% lock survival, lost in 10 of
+  10 runs. It is very sensitive to box scale — much better tight than loose —
+  but it does not get to be the default on that.
+- **Its score flags the wrong moment.** AUC ~0.70, and when the tracker drifts
+  onto a distractor — the realistic failure, not a target vanishing — the score
+  dips during the transition and then *climbs back* as it grows confident about
+  the wrong object. Nano's score is worse than useless: higher when wrong
+  (0.854) than when right (0.822).
+
+**No tracker here has a usable lost-lock signal.** The fallback therefore fires
+on consecutive `update()` failures, the mechanism already in place; the score
+only derates confidence and goes in the log. Recovery belongs to
+`SaliencyDetector` re-acquisition.
+
+Most accurate measured at 8–20 px was **TrackerNano** (2.5–3.7 px, 89–100% lock,
+0/10 losses at 20 px) at ~0.2× CSRT's cost. Not adopted yet: that ratio is x86,
+OpenCV's NEON path is weaker than its AVX2 path, and there is still **no Pi
+measurement of anything.**
 
 Two failures, deliberately handled differently:
 
-- **Weights or OpenCV missing** → `make_tracker` logs it and runs pixels only.
-  Degrades to the previous behaviour; never blocks arming. The `.onnx` is
-  gitignored, so a fresh clone behaves exactly as before until
-  `tools/fetch_tracker_model.py` has been run.
+- **Weights or OpenCV missing** → `make_tracker` logs it and runs pixels only;
+  never blocks arming. The `.onnx` is gitignored, so a fresh clone behaves as
+  before until `tools/fetch_tracker_model.py` runs.
 - **Lost lock in flight** → `_handover` gives the last good box to CSRT and
-  carries on. One-way per target: no flapping between backends on a target the
-  deep tracker has already shown it cannot hold.
+  carries on, one-way per target, instead of abandoning the target.
 
-Confidence after a handover is capped at `degraded_confidence` (0.60). Without
-that cap the handover resets `fail_count` and hands full authority straight back
-to the tracker that *cannot* report being wrong.
+Confidence after a handover is capped at `degraded_confidence` (0.60): the
+handover resets `fail_count`, which would otherwise hand full authority straight
+back to the tracker that cannot report being wrong.
 
-Score band: measured, a correct ViT lock scores ~0.47–0.55 and an absent target
-collapses to ~0.07, so `score_confident` is 0.35 — high enough to leave a
-healthy lock at full authority, low enough to derate a marginal one. Setting it
-near a good lock's own score taxes every command for no reason.
-
-Two upstream bugs are worked around, both in `VitTracker`:
-- **opencv#30350** — ViT never clips its box to the frame and the score
-  threshold does not catch the runaway, so it can grow until memory runs out.
-  `_clip` rejects any box that has outgrown the frame. Safety, not tidiness.
+Two upstream ViT bugs are worked around in `VitTracker`:
+- **opencv#30350** — it never clips its box to the frame, and the score
+  threshold does not catch the runaway: 30×30 → 1416×912 observed, with latency
+  2.6 → 47.6 ms exactly when the tracker is already lost. The old `w > 5 and
+  h > 5` guard catches the collapse-to-zero case but *not* the growth. `_clip`
+  rejects any box that has outgrown the frame. Safety, not tidiness.
 - **opencv#30164** — `1.0 / Scalar` is quaternion division, so two of three
-  normalisation channels are sign-flipped in 4.11–4.14. Measured no detectable
-  difference on our footage; 4.10.0 is the clean pin if it ever matters.
+  normalisation channels are sign-flipped in 4.11–4.14. No detectable
+  difference measured; 4.10.0 is the clean pin if it ever matters.
 
-Still unknown, and it is the open question: **no published measurement exists of
-any deep tracker below ~20 px on target.** These nets were trained on objects
-filling a good fraction of the crop. ViT may well do *worse* than CSRT's HOG at
-§6 sizes. Hence pixels are kept, and `INIT_PATCH_SIZE` (72 px, tuned for CSRT)
-is deliberately left alone — a deep tracker squeezes the init box into a fixed
-template, so 72 px around a 10 px target is almost all background. Shrinking it
-is the next experiment, not part of the swap.
+Caveat on all of the above: **synthetic terrain, x86, 5 s clips.** No rolling
+shutter, JPEG artefacts, haze, parallax or real vehicle signature. It is enough
+to rule things out, not enough to pick a flight configuration. Real footage
+through `tools/benchmark_detector.py` is still the gate.
 
-## 8. Practical notes
+## 9. Practical notes
 
 - `config/config.yaml` has **uncommitted local modifications** on the operator's
   machine. Prefer code defaults (`cfg.get(...)`) over editing it, to avoid pull

@@ -66,14 +66,11 @@ pip install -r requirements.txt
 You will see `(venv)` appear at the start of the line — that means it worked.  
 The install takes a few minutes. Wait until it finishes.
 
-Then download the tracking model (715 KB, once — you need internet for this step):
-```
-python tools/fetch_tracker_model.py
-```
-
-> You can skip this and the system still runs — it just falls back to the older
-> pixel-based tracker and says so in the log. With the model it tracks better
-> and, more importantly, it can tell when it has lost the target.
+> **You do not need to download any model.** Tracking runs on CSRT out of the
+> box. There is an experimental transformer tracker available — if you ever want
+> to try it, run `python tools/fetch_tracker_model.py` (715 KB, once) and set
+> `detection.tracker_backend: vit` in `config/config.yaml`. Benchmarks so far
+> put it *behind* CSRT on small, far-away targets, so it is off by default.
 
 ---
 
