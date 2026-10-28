@@ -62,11 +62,11 @@ owns throttle from that point. Throttle is **0%** while tracking in ACRO.
 
 ## 4. Confidence decay while coasting
 
-When CSRT fails, the detector keeps reporting the last known box for up to
-`coast_limit` (20) frames. `ObjectDetector.confidence()` decays 1.0 → 0.0 across
-that window and `_send_control` scales roll and pitch by it, so the aircraft
-winds down smoothly instead of steering at full authority on a position that can
-be ~2 s old.
+When the tracker fails, the detector keeps reporting the last known box for up
+to `coast_limit` (20) frames. `ObjectDetector.confidence()` decays 1.0 → 0.0
+across that window and `_send_control` scales roll and pitch by it, so the
+aircraft winds down smoothly instead of steering at full authority on a position
+that can be ~2 s old.
 
 Attitude-based wing levelling is deliberately **not** derated — it comes from a
 live `ATTITUDE` reading, not from tracker pixels.
@@ -105,7 +105,59 @@ Below ~8 px nothing works, and that is not fixable in software. Resolution and
 lens FOV buy more altitude than any model change. People (~0.5 m) are not
 achievable at these altitudes; vehicles are.
 
-## 7. Practical notes
+## 7. Tracking: deep primary, pixels as the fallback
+
+`onboard/trackers.py` holds two backends behind one interface. `detection.
+tracker_backend` picks the primary (default `vit`); `csrt` forces pixels only.
+
+| | reports a score? |
+|---|---|
+| `cv2.TrackerVit` — 715 KB transformer, primary | **yes, 0…1** |
+| `cv2.TrackerCSRT` — correlation filter, fallback | no |
+
+**The score is the reason ViT is primary, not the speed and not the accuracy.**
+A fallback can only fire if the primary can say "I have lost it".
+`cv2.TrackerCSRT.getTrackingScore()` returns `-1.0` unconditionally — the method
+exists but is not implemented — so a CSRT-only system cannot know when to
+degrade. NanoTrack is faster than both and was rejected for the same reason: its
+score barely separates present from absent, and `update()` always returns true.
+
+Two failures, deliberately handled differently:
+
+- **Weights or OpenCV missing** → `make_tracker` logs it and runs pixels only.
+  Degrades to the previous behaviour; never blocks arming. The `.onnx` is
+  gitignored, so a fresh clone behaves exactly as before until
+  `tools/fetch_tracker_model.py` has been run.
+- **Lost lock in flight** → `_handover` gives the last good box to CSRT and
+  carries on. One-way per target: no flapping between backends on a target the
+  deep tracker has already shown it cannot hold.
+
+Confidence after a handover is capped at `degraded_confidence` (0.60). Without
+that cap the handover resets `fail_count` and hands full authority straight back
+to the tracker that *cannot* report being wrong.
+
+Score band: measured, a correct ViT lock scores ~0.47–0.55 and an absent target
+collapses to ~0.07, so `score_confident` is 0.35 — high enough to leave a
+healthy lock at full authority, low enough to derate a marginal one. Setting it
+near a good lock's own score taxes every command for no reason.
+
+Two upstream bugs are worked around, both in `VitTracker`:
+- **opencv#30350** — ViT never clips its box to the frame and the score
+  threshold does not catch the runaway, so it can grow until memory runs out.
+  `_clip` rejects any box that has outgrown the frame. Safety, not tidiness.
+- **opencv#30164** — `1.0 / Scalar` is quaternion division, so two of three
+  normalisation channels are sign-flipped in 4.11–4.14. Measured no detectable
+  difference on our footage; 4.10.0 is the clean pin if it ever matters.
+
+Still unknown, and it is the open question: **no published measurement exists of
+any deep tracker below ~20 px on target.** These nets were trained on objects
+filling a good fraction of the crop. ViT may well do *worse* than CSRT's HOG at
+§6 sizes. Hence pixels are kept, and `INIT_PATCH_SIZE` (72 px, tuned for CSRT)
+is deliberately left alone — a deep tracker squeezes the init box into a fixed
+template, so 72 px around a 10 px target is almost all background. Shrinking it
+is the next experiment, not part of the swap.
+
+## 8. Practical notes
 
 - `config/config.yaml` has **uncommitted local modifications** on the operator's
   machine. Prefer code defaults (`cfg.get(...)`) over editing it, to avoid pull

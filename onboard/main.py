@@ -201,6 +201,12 @@ class TrackingSystem:
                 'bank_rad': f"{self._last_bank_rad:.4f}",
                 'fail_count': self.detector.fail_count,
                 'confidence': f"{self.detector.confidence():.3f}",
+                # The tracker's own match score, and whether we have fallen
+                # back to pixels — the two things that say *why* confidence
+                # dropped, which is the first question after a lost lock.
+                'track_score': (f"{self.detector.last_score:.3f}"
+                                if self.detector.last_score is not None else ''),
+                'degraded': int(self.detector.degraded),
                 'loop_ms': f"{(time.time() - loop_t0) * 1000:.2f}",
             })
 

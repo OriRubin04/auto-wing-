@@ -66,7 +66,14 @@ pip install -r requirements.txt
 You will see `(venv)` appear at the start of the line — that means it worked.  
 The install takes a few minutes. Wait until it finishes.
 
-> The first time you run the tracking script, it will auto-download the AI model (~6 MB). You need internet once for that.
+Then download the tracking model (715 KB, once — you need internet for this step):
+```
+python tools/fetch_tracker_model.py
+```
+
+> You can skip this and the system still runs — it just falls back to the older
+> pixel-based tracker and says so in the log. With the model it tracks better
+> and, more importantly, it can tell when it has lost the target.
 
 ---
 

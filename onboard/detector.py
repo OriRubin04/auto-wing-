@@ -2,12 +2,20 @@ import cv2
 import logging
 
 from onboard.saliency import SaliencyDetector
+from onboard.trackers import make_tracker
 
 logger = logging.getLogger(__name__)
 
 
-# Size of the patch CSRT is initialised on, in pixels.
+# Size of the patch the tracker is initialised on, in pixels.
 # Smaller = more specific (less likely to drift); bigger = more texture = more stable.
+#
+# Tuned for CSRT, which matches raw pixels and benefits from surrounding
+# texture.  The deep tracker wants the opposite - it squeezes the init box into
+# a fixed-size template, so 72 px around a 10 px target spends almost the whole
+# template on background.  Shrinking this is worth doing and is deliberately
+# NOT part of the backend swap: it changes target *selection*, and one change
+# at a time is how we stay able to tell what broke.
 INIT_PATCH_SIZE = 72
 
 
@@ -73,18 +81,24 @@ class ObjectDetector:
     ────────
     1. User clicks a pixel on GCS.
     2. The proposal backend runs once to find a distinct object at that spot.
-       - If found → use its centre, but cap the box to INIT_PATCH_SIZE so CSRT
-         gets a tight, specific patch.
+       - If found → use its centre, but cap the box to INIT_PATCH_SIZE so the
+         tracker gets a tight, specific patch.
        - If not   → use a fixed-size patch centred on the click.
-    3. CSRT tracks that visual patch frame-by-frame.  No further proposal calls
-       during normal tracking, so nothing can cause a target switch.
-    4. If CSRT fails for max_fails×2 consecutive frames → try one re-acquisition
-       within 120 px of the last known position, then reinit CSRT.  Otherwise
+    3. The primary tracker follows that visual patch frame-by-frame.  No further
+       proposal calls during normal tracking, so nothing can cause a target
+       switch.
+    4. If the primary fails for max_fails×2 consecutive frames → hand the last
+       known box to the pixel tracker and carry on with that (once per target).
+    5. If the pixel tracker then fails for the same number of frames → try one
+       re-acquisition within 120 px of the last known position.  Otherwise
        enter SEARCHING.
+
+    Step 4 is why the primary is a tracker that can report its own uncertainty:
+    a handover can only be triggered by a tracker able to say "I lost it".
     """
 
     STATE_SEARCHING = "searching"
-    STATE_TRACKING = "tracking"   # CSRT active
+    STATE_TRACKING = "tracking"   # a tracker is locked on
 
     def __init__(self, cfg):
         self.cfg = cfg
@@ -92,12 +106,41 @@ class ObjectDetector:
         self.last_bbox = None   # (x, y, w, h) — top-left corner + size
         self.fail_count = 0
         self.max_fails = cfg.get('max_detection_failures', 10)
-        # Consecutive CSRT failures tolerated before we give up and re-acquire.
+        # Consecutive tracker failures tolerated before we hand over or give up.
         # Frames 1..coast_limit-1 are "coasting": the box returned is the last
         # KNOWN position, not a fresh measurement.
         self.coast_limit = self.max_fails * 2
-        self._cv_tracker = None
-        self._tracker_type = cfg.get('fallback_tracker', 'CSRT')
+
+        # Primary tracker, and the pixel tracker behind it.  `fallback` is None
+        # when the primary already is the pixel tracker, i.e. nothing further
+        # to degrade to.
+        self._primary, self._fallback = make_tracker(cfg)
+        self._tracker = None      # whichever of the two is currently live
+        self.degraded = False     # True once we have handed over to pixels
+        self.last_score = None    # primary's own 0..1 match score, if it has one
+
+        # Score band used by confidence().  Below `score_lost` the tracker's own
+        # update() already reports failure; between the two we derate rather
+        # than pretending the position is as good as a clean lock.
+        #
+        # Measured on a synthetic clip: a correct ViT lock scores ~0.47-0.55,
+        # and with the target absent the score collapses to ~0.07.  So the band
+        # must close well below a healthy lock's score - set it at 0.60 and a
+        # perfectly tracked target flies at 0.7-0.85 authority forever, which
+        # is a regression dressed up as caution.  0.35 derates only a genuinely
+        # marginal lock.  Worth re-checking against real footage; the numbers
+        # above are from procedural texture, not a camera.
+        self.score_lost = float(cfg.get('vit_score_threshold', 0.20))
+        self.score_good = float(cfg.get('score_confident', 0.35))
+
+        # Ceiling on confidence once we have fallen back to pixel tracking.
+        # Without it the handover would hand full authority straight back: the
+        # primary says "lost", we reset the fail count, and CSRT - which cannot
+        # tell us it is wrong - reports a clean lock on whatever it latched
+        # onto.  A best-effort continuation is not a fresh lock, and the
+        # aircraft should not commit to it as if it were.
+        self.degraded_confidence = float(cfg.get('degraded_confidence', 0.60))
+
         self.proposer = make_proposer(cfg)
 
     # ------------------------------------------------------------------ #
@@ -108,31 +151,49 @@ class ObjectDetector:
         """
         How much to trust the position currently being reported, 0.0 … 1.0.
 
-        1.0  = fresh CSRT measurement this frame.
-        <1.0 = coasting on the last known box; decays linearly with the number
-               of consecutive failures.
-        0.0  = the box is as old as we are willing to act on at all.
+        Two separate things can lower it:
 
-        Callers scale control commands by this so the aircraft stops
-        committing to a stale position gradually rather than either steering
-        blindly for the whole coast window or jerking to a stop on every
-        single-frame tracker hiccup.
+        Coasting - the tracker reported failure, and the box being returned is
+        the last KNOWN position, not a fresh measurement.  Decays linearly with
+        the number of consecutive failures.  This is the only mechanism
+        available behind the pixel tracker, which reports no score.
+
+        A weak lock - the tracker measured the target this frame but is not
+        sure it is the right one.  Only the deep tracker can tell us this, and
+        it is strictly better information than frame counting: it derates
+        *before* the lock is lost rather than after.
+
+        Callers scale control commands by this, so the aircraft winds down
+        smoothly instead of either steering at full authority on a stale
+        position or jerking to a stop on a single-frame hiccup.
         """
         if self.state != self.STATE_TRACKING or self.last_bbox is None:
             return 0.0
-        if self.fail_count <= 0:
-            return 1.0
-        return max(0.0, 1.0 - (self.fail_count / float(self.coast_limit)))
+
+        if self.fail_count > 0:
+            conf = max(0.0, 1.0 - (self.fail_count / float(self.coast_limit)))
+        elif self.last_score is None:
+            conf = 1.0   # no score available (pixel tracker) — a lock is a lock
+        else:
+            span = self.score_good - self.score_lost
+            conf = 1.0 if span <= 0 else \
+                max(0.0, min(1.0, (self.last_score - self.score_lost) / span))
+
+        if self.degraded:
+            conf = min(conf, self.degraded_confidence)
+        return conf
 
     def select_target(self, click_x, click_y, frame):
-        """Called when the user clicks on GCS.  Initialises CSRT immediately."""
+        """Called when the user clicks on GCS.  Initialises the tracker now."""
         self.state = self.STATE_SEARCHING
         self.last_bbox = None
         self.fail_count = 0
-        self._cv_tracker = None
+        self._tracker = None
+        self.degraded = False
+        self.last_score = None
 
-        # Snap to a distinct object near the click, but keep the CSRT patch a
-        # small fixed size so the tracker learns the specific region pointed at.
+        # Snap to a distinct object near the click, but keep the patch a small
+        # fixed size so the tracker learns the specific region pointed at.
         centre_x, centre_y = click_x, click_y
         hint = self.proposer.find_nearest(frame, click_x, click_y, max_dist=80)
         if hint is not None:
@@ -142,11 +203,20 @@ class ObjectDetector:
             logger.info(f"Proposal hint: centre ({centre_x},{centre_y}) size {hw}x{hh}")
 
         bbox = self._make_patch(frame, centre_x, centre_y, INIT_PATCH_SIZE)
-        self._init_cv_tracker(frame, bbox)
-        if self._cv_tracker is not None:
+
+        if self._start(frame, bbox, self._primary):
             self.last_bbox = bbox
             self.state = self.STATE_TRACKING
-            logger.info(f"CSRT initialised on patch {bbox}")
+            logger.info(f"{self._tracker.name} initialised on patch {bbox}")
+            return True
+
+        # Primary refused the patch outright.  Try pixels before giving up on
+        # the operator's click — a failed selection is worse than a weak one.
+        if self._start(frame, bbox, self._fallback):
+            self.degraded = True
+            self.last_bbox = bbox
+            self.state = self.STATE_TRACKING
+            logger.warning(f"Primary init failed; tracking on {self._tracker.name}")
             return True
 
         logger.error("Could not initialise any tracker")
@@ -159,10 +229,11 @@ class ObjectDetector:
         """
         annotated = frame.copy()
 
-        if self.state == self.STATE_SEARCHING or self._cv_tracker is None:
+        if self.state == self.STATE_SEARCHING or self._tracker is None:
             return None, self.state, annotated
 
-        ok, rect = self._cv_tracker.update(frame)
+        ok, rect, score = self._tracker.update(frame)
+        self.last_score = score
         if ok:
             x, y, w, h = [int(v) for v in rect]
             # Sanity-check: reject obviously degenerate boxes
@@ -175,22 +246,26 @@ class ObjectDetector:
         if not ok:
             self.fail_count += 1
             if self.fail_count >= self.coast_limit:
-                # Try re-acquisition near last known position
-                ref_cx, ref_cy = self._bbox_center(self.last_bbox)
-                new_bbox = self.proposer.find_nearest(frame, ref_cx, ref_cy, max_dist=120)
-                if new_bbox is not None:
-                    nx, ny, nw, nh = new_bbox
-                    centre_x = nx + nw // 2
-                    centre_y = ny + nh // 2
-                    patch = self._make_patch(frame, centre_x, centre_y, INIT_PATCH_SIZE)
-                    self._init_cv_tracker(frame, patch)
-                    self.last_bbox = patch
-                    self.fail_count = 0
-                    logger.info("Re-acquired; CSRT reinitialised")
-                else:
-                    logger.warning("Tracker lost target — entering SEARCHING")
-                    self.state = self.STATE_SEARCHING
-                    return None, self.state, annotated
+                # The advanced tracker has given up.  Before abandoning the
+                # target, hand the last known box to pixel tracking and let it
+                # carry on from there.
+                if not self._handover(frame):
+                    # Try re-acquisition near last known position
+                    ref_cx, ref_cy = self._bbox_center(self.last_bbox)
+                    new_bbox = self.proposer.find_nearest(frame, ref_cx, ref_cy, max_dist=120)
+                    if new_bbox is not None:
+                        nx, ny, nw, nh = new_bbox
+                        centre_x = nx + nw // 2
+                        centre_y = ny + nh // 2
+                        patch = self._make_patch(frame, centre_x, centre_y, INIT_PATCH_SIZE)
+                        self._start(frame, patch, self._tracker)
+                        self.last_bbox = patch
+                        self.fail_count = 0
+                        logger.info(f"Re-acquired; {self._tracker.name} reinitialised")
+                    else:
+                        logger.warning("Tracker lost target — entering SEARCHING")
+                        self.state = self.STATE_SEARCHING
+                        return None, self.state, annotated
 
         # Annotate
         if self.last_bbox:
@@ -201,6 +276,10 @@ class ObjectDetector:
             cv2.rectangle(annotated, (x, y), (x + w, y + h), color, 2)
             cv2.circle(annotated, (cx, cy), 5, color, -1)
             label = "TRACK" if ok else f"COAST({self.fail_count})"
+            if ok and self.last_score is not None:
+                label += f" {self.last_score:.2f}"
+            if self.degraded:
+                label += " [px]"
             cv2.putText(annotated, label, (x, y - 8),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
             return (cx, cy, w, h), self.state, annotated
@@ -220,27 +299,41 @@ class ObjectDetector:
         y = max(0, min(cy - half, h - size))
         return (x, y, size, size)
 
-    def _init_cv_tracker(self, frame, bbox):
-        factories = []
-        for ns in [cv2, getattr(cv2, 'legacy', None)]:
-            if ns is None:
-                continue
-            for name in [f'Tracker{self._tracker_type}_create',
-                         'TrackerCSRT_create', 'TrackerKCF_create', 'TrackerMOSSE_create']:
-                fn = getattr(ns, name, None)
-                if fn and fn not in factories:
-                    factories.append(fn)
-        for factory in factories:
-            try:
-                t = factory()
-                t.init(frame, bbox)
-                self._cv_tracker = t
-                logger.info(f"Tracker: {factory.__name__}")
-                return
-            except Exception:
-                continue
-        logger.error("No working OpenCV tracker found")
-        self._cv_tracker = None
+    def _start(self, frame, bbox, tracker):
+        """Init `tracker` on `bbox` and make it the live one.  True on success."""
+        if tracker is None:
+            return False
+        try:
+            if tracker.init(frame, bbox):
+                self._tracker = tracker
+                return True
+        except Exception as e:
+            logger.error(f"{getattr(tracker, 'name', 'tracker')} init failed: {e}")
+        return False
+
+    def _handover(self, frame):
+        """
+        The primary tracker has lost lock — continue on pixel tracking.
+
+        This is the fallback the whole backend split exists for.  It fires on
+        the primary's own admission of failure, hands over the last position it
+        was confident about, and is one-way: once degraded we stay on pixels
+        until the next select_target, rather than flapping between backends on
+        a target the deep tracker has already shown it cannot hold.
+
+        False means there is nothing to hand over to (already degraded, or the
+        pixel tracker *is* the primary), so the caller should fall through to
+        re-acquisition.
+        """
+        if self.degraded or self._fallback is None or self.last_bbox is None:
+            return False
+        if not self._start(frame, self.last_bbox, self._fallback):
+            return False
+        self.degraded = True
+        self.fail_count = 0
+        self.last_score = None     # pixels report none; confidence goes back to coasting
+        logger.warning(f"Primary tracker lost lock — handed over to {self._tracker.name}")
+        return True
 
     @staticmethod
     def _bbox_center(bbox):
