@@ -121,19 +121,38 @@ helps whichever backend runs.
 
 So the box is sized from the proposal now (`_box_size`), not from a constant.
 
-**`INIT_BOX_SCALE` is 1.25, not the benchmark's best 2.5, and that is not a
-disagreement.** The benchmark scaled the target's *true* footprint. We only
-have the saliency hint, which is itself inflated — the DoG response cannot
-resolve below its filter scale and bottoms out near 20 px:
+`INIT_BOX_SCALE` is **1.25**, and it is scaled onto the saliency hint, not onto
+the target — we never know the true footprint in flight. 1.25 survived a paired
+sign test (every scale run on the same 10 clips, so terrain variance cancels):
+across 0.5–4.0 at 8/12/20/30 px, on **both** CSRT and ViT, **no scale beats it
+anywhere.** ViT additionally collapses above ~2.0 (68% → 4% lock at 8 px), so
+widening would break the backend we kept selectable. Leave it at 1.25.
 
-| true target | 6 | 8 | 10 | 14 | 20 | 28 | 40 | 60 |
-|---|---|---|---|---|---|---|---|---|
-| saliency hint | 26 | 24 | 20 | 19 | 26 | 35 | 47 | 65 |
-| inflation | 4.3× | 3.0× | 2.0× | 1.4× | 1.4× | 1.3× | 1.2× | 1.1× |
+**The thing to actually know: the hint is set by terrain texture, not by the
+target.** Same targets, same estimator, different ground:
 
-2.5× the *hint* is 5× the small targets we actually fly against. 1.25× lands
-the box at 1.4–2.5× the true target across the range. Do not "restore" 2.5 from
-reading the benchmark without replacing the size estimator too.
+| true target | 8 | 12 | 20 | 30 |
+|---|---|---|---|---|
+| hint over textured ground | 7 | 11 | 14 | 20 |
+| hint over smooth ground | 19 | 25 | 41 | 59 |
+
+So at scale 1.25 the box lands at **0.85–1.17× the true target over textured
+ground and 2.5–3.0× over smooth ground** — a 3× swing that no single scale
+value can absorb. `threshold_k` moves it as well (k=1.0 → 12/18/27/37;
+k=3.0 → 6/9/13/6).
+
+An earlier version of this section gave only the smooth-ground numbers and
+attributed them to the DoG filter scale ("bottoms out near 20 px"). That was a
+property of the calibration scene, not of the estimator. **box/true is the
+rig-independent quantity; the hint is not.** Map through your own footage
+before trusting any scale number here.
+
+Consequence of `INIT_BOX_MIN = 24`: over textured ground it clamps 8, 12 *and*
+20 px — the whole range §6 cares about — so the scale is inert below ~30 px
+there and a flat 24 px box is what actually flies. Not harmful on the evidence
+(scale 2.0 did not separate from 1.25 in the paired test), but tuning the scale
+at those sizes will look like it does nothing, which is confusing rather than
+wrong.
 
 ## 8. Tracking backends, and the argument that did not survive
 
