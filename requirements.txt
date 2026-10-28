@@ -1,5 +1,10 @@
 pymavlink>=2.4.40
-opencv-python>=4.8.0
+# >=4.9.0 for cv2.TrackerVit (the primary tracker).  On an older build the
+# onboard software logs the miss and tracks on CSRT instead of failing.
+opencv-contrib-python>=4.9.0
 numpy>=1.24.0
-ultralytics>=8.0.0
 pyyaml>=6.0
+
+# Optional: only needed if you set detection.backend: "yolo" in config.yaml.
+# Pulls in PyTorch (~2 GB) and is not required for the default saliency backend.
+# ultralytics>=8.0.0
