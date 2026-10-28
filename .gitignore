@@ -5,10 +5,15 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-# Virtual environments
+# Virtual environments.
+# Benchmarking a candidate tracker often means a throwaway env with a
+# different OpenCV build than the system one, so match those by name too.
 venv/
 .venv/
 env/
+ocv*/
+*-venv/
+venv-*/
 
 # Model weights (downloaded on demand, not source)
 *.pt
