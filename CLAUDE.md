@@ -226,3 +226,7 @@ through `tools/benchmark_detector.py` is still the gate.
   `CAP_DSHOW` is the correct backend for now. MJPEG fourcc is still required
   the moment resolution exceeds 640×480 — uncompressed 720p exceeds USB 2.0
   bandwidth and the driver silently drops to ~5 fps rather than erroring.
+- Pi deployment (install, wiring to the flight controller, FC parameters,
+  bench-test order) is written up in `docs/raspberry-pi-setup.md`, and
+  `tools/install_pi.sh` is the one-command setup. Nothing there has been run on
+  real hardware yet either — it is the plan, not a report.

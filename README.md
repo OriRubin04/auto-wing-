@@ -194,28 +194,44 @@ Start with small numbers and increase slowly.
 
 ---
 
-## Moving to Real Hardware (Raspberry Pi) — Later
+## Moving to Real Hardware (Raspberry Pi 5)
 
-When simulation works and you're ready for real flights:
+Full instructions — install, camera, config, **wiring to the flight
+controller**, flight-controller parameters and the bench-test order — are in:
 
-1. Copy the `auto-wing-` folder to your Raspberry Pi (via USB stick or `scp`)
-2. On the Pi, open a terminal and run:
-   ```
-   pip install -r requirements.txt
-   python onboard/main.py
-   ```
-3. On your laptop, run:
-   ```
-   python gcs\gcs_client.py
-   ```
-4. Edit `config\config.yaml`:
-   ```yaml
-   mavlink:
-     connection_string: "/dev/ttyUSB0"   # Pi connected to FC via USB
-     baudrate: 115200
-   gcs:
-     onboard_ip: "192.168.1.xxx"         # your Pi's IP address
-   ```
+### 📄 [`docs/raspberry-pi-setup.md`](docs/raspberry-pi-setup.md)
+
+The short version. SSH into a fresh Raspberry Pi OS **Lite (64-bit)** install
+and run one command:
+
+```
+curl -fsSL https://raw.githubusercontent.com/OriRubin04/auto-wing-/main/tools/install_pi.sh | bash
+```
+
+That installs everything, sets the Pi 5 USB-current flag the camera needs, and
+writes a `systemd` service (left disabled until you have run it by hand once).
+It does **not** touch `config/config.yaml` — that is per-aircraft.
+
+Then edit `config/config.yaml` on the Pi:
+
+```yaml
+camera:
+  index: 0                             # v4l2-ctl --list-devices
+mavlink:
+  connection_string: "/dev/ttyUSB0"    # USB-TTL adapter to FC TELEM2
+  baudrate: 921600                     # must match SERIAL2_BAUD on the FC
+```
+
+and on your laptop:
+
+```yaml
+gcs:
+  onboard_ip: "192.168.1.xxx"          # `hostname -I` on the Pi
+```
+
+> There is no ready-made `.img` to download; the installer is the equivalent.
+> Once your card is set up and working, clone it — that is your image. The
+> guide explains how.
 
 ---
 
@@ -223,16 +239,28 @@ When simulation works and you're ready for real flights:
 
 ```
 auto-wing-\
-├── config\config.yaml        ← all settings (edit this)
+├── config\config.yaml            ← all settings (edit this)
 ├── onboard\
-│   ├── main.py               ← run this on Pi / laptop
-│   ├── detector.py           ← YOLO + backup tracker
-│   ├── controller.py         ← PID math
-│   ├── mavlink_interface.py  ← talks to flight controller
-│   └── streamer.py           ← sends video to GCS
+│   ├── main.py                   ← run this on Pi / laptop
+│   ├── detector.py               ← target selection, re-acquisition, coasting
+│   ├── saliency.py               ← finds what stands out (default backend)
+│   ├── trackers.py               ← CSRT (default) and ViT (opt-in)
+│   ├── controller.py             ← PID math
+│   ├── mavlink_interface.py      ← talks to flight controller
+│   ├── streamer.py               ← sends video to GCS
+│   └── flight_log.py             ← logs\<run>\flight.csv + video
 ├── gcs\
-│   └── gcs_client.py         ← run this on your laptop
+│   └── gcs_client.py             ← run this on your laptop
+├── tools\
+│   ├── install_pi.sh             ← one-command Raspberry Pi 5 setup
+│   ├── camera_test.py            ← which camera index works
+│   ├── record.py                 ← record footage for benchmarking
+│   ├── benchmark_detector.py     ← score the tracker on real footage
+│   └── fetch_tracker_model.py    ← optional ViT weights
+├── docs\
+│   └── raspberry-pi-setup.md     ← Pi install + aircraft wiring
 ├── simulation\
-│   └── sitl_setup.md         ← extra SITL notes
+│   └── sitl_setup.md             ← extra SITL notes
+├── CLAUDE.md                     ← why things are the way they are
 └── requirements.txt
 ```
