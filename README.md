@@ -199,7 +199,7 @@ Start with small numbers and increase slowly.
 Full instructions — install, camera, config, **wiring to the flight
 controller**, flight-controller parameters and the bench-test order — are in:
 
-### 📄 [`docs/raspberry-pi-setup.md`](docs/raspberry-pi-setup.md)
+### 📄 [`docs/raspberry-pi-setup.md`](docs/raspberry-pi-setup.md) — ‏בעברית / in Hebrew
 
 The short version. SSH into a fresh Raspberry Pi OS **Lite (64-bit)** install
 and run one command:

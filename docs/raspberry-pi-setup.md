@@ -1,158 +1,213 @@
-# Raspberry Pi 5 — install and wiring
+<div dir="rtl">
 
-Everything the aircraft needs runs on the Pi: camera, saliency proposal,
-tracker, PID, RC override. The ground station only sends the target click and
-receives video (CLAUDE.md §1). So the Pi has to work with the radio link dead,
-and that is what this guide sets up.
+# התקנה על Raspberry Pi 5 וחיווט במטוס
 
-Two halves:
+כל החישוב רץ על הפאי: מצלמה, איתור מטרה, מעקב, PID ושליטה דרך RC override.‏
+התחנה הקרקעית רק שולחת את הקליק על המטרה ומקבלת וידאו (CLAUDE.md סעיף 1).
+כלומר הפאי חייב לעבוד גם כשקישור הרדיו מת, וזה מה שהמדריך הזה מגדיר.
 
-- **Part A — software**, one command.
-- **Part B — wiring**, Pi ↔ flight controller ↔ power.
+המדריך מחולק לשניים:
 
-> **About a ready-made image:** there is no `.img` to download. Building a
-> bootable Pi image is not something that can be produced from this repo, and a
-> 2–4 GB file is not something to pass around anyway. `tools/install_pi.sh` is
-> the equivalent: one command, same result, and it survives `git pull`.
-> Once a card is set up and flying, **clone that card** — that is your image.
-> See [Making your own image](#making-your-own-image) at the end.
+- **חלק א׳ — תוכנה**, פקודה אחת.
+- **חלק ב׳ — חיווט**, פאי אל בקר הטיסה ואל המתח.
+
+> **לגבי אימג׳ מוכן:** אין קובץ `.img` להורדה. בניית אימג׳ לפאי היא לא משהו
+> שאפשר להפיק מהמאגר הזה, וקובץ של שלושה ג׳יגה־בייט הוא בכל מקרה לא דרך טובה
+> להעביר תוכנה. `tools/install_pi.sh` הוא התחליף: פקודה אחת, אותה תוצאה, והוא
+> שורד `git pull`. אחרי שכרטיס אחד מוגדר ועובד — **שבט את הכרטיס**, וזה האימג׳
+> שלך. ראה את הפרק האחרון, "לבנות אימג׳ בעצמך".
+
+</div>
 
 ---
 
-## Part A — software
+<div dir="rtl">
 
-### A1. Flash the card
+## חלק א׳ — תוכנה
 
-Use **Raspberry Pi Imager**.
+### א1. צריבת הכרטיס
 
-- OS: **Raspberry Pi OS (64-bit) Lite**, Bookworm or newer.
-  Lite, not Desktop — nothing onboard draws a window. `onboard/main.py` never
-  calls `imshow`; the GUI lives on your laptop in `gcs/gcs_client.py`.
-- Click the gear / **Edit Settings** before writing and set:
-  - hostname: `autowing`
-  - username / password (this guide assumes user `pi`)
-  - **Enable SSH** → password authentication
-  - Wi-Fi: your home network *and* your field hotspot if Imager lets you
-    (it only takes one; add the second later with `nmcli`).
+השתמש ב‑**Raspberry Pi Imager**.
 
-Boot the Pi, then from your laptop:
+- מערכת הפעלה: **Raspberry Pi OS (64-bit) Lite**, גרסת Bookworm ואילך.
+  דווקא Lite ולא Desktop — שום דבר על המטוס לא פותח חלון. `onboard/main.py`
+  לא קורא ל‑`imshow` אף פעם; הממשק הגרפי רץ על המחשב הנייד, ב‑`gcs/gcs_client.py`.‏
+- לפני הכתיבה לחץ על גלגל השיניים (**Edit Settings**) והגדר:
+  - שם מחשב: `autowing`
+  - שם משתמש וסיסמה (המדריך מניח שהמשתמש הוא `pi`)
+  - **הפעל SSH** עם אימות סיסמה
+  - Wi-Fi: גם הרשת הביתית וגם נקודת החם שתשתמש בה בשדה, אם Imager מאפשר
+    להזין שתיים. הוא בדרך כלל מאפשר רק אחת; את השנייה תוסיף אחר כך עם `nmcli`.‏
+
+אחרי שהפאי עלה, מהמחשב הנייד:
+
+</div>
 
 ```
 ssh pi@autowing.local
 ```
 
-### A2. Run the installer
+<div dir="rtl">
+
+### א2. הרצת ההתקנה
+
+</div>
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/OriRubin04/auto-wing-/main/tools/install_pi.sh | bash
 ```
 
-Prefer not to pipe a script from the network into bash? Clone first and read it:
+<div dir="rtl">
+
+> **כל עוד זה לא מוזג ל‑`main`** הכתובת הזאת תחזיר 404. עד אז השתמש בענף:
+
+</div>
 
 ```bash
-git clone https://github.com/OriRubin04/auto-wing-.git ~/auto-wing-
+git clone -b claude/tender-hamilton-Dz0Se https://github.com/OriRubin04/auto-wing-.git ~/auto-wing-
 bash ~/auto-wing-/tools/install_pi.sh
 ```
 
-> **Until this is merged into `main`**, that URL 404s. Use the branch instead:
-> ```bash
-> git clone -b claude/tender-hamilton-Dz0Se https://github.com/OriRubin04/auto-wing-.git ~/auto-wing-
-> bash ~/auto-wing-/tools/install_pi.sh
-> ```
+<div dir="rtl">
 
-It is idempotent — safe to re-run. It:
+מעדיף לא להזרים סקריפט מהרשת ישר ל‑bash? שיקול נכון. שכפל קודם וקרא אותו:
 
-1. installs apt packages (`python3-venv`, `v4l-utils`, the libs the OpenCV
-   wheel links against, the headers `pymavlink` may need to build);
-2. clones or updates the repo at `~/auto-wing-`;
-3. builds a venv at `~/auto-wing-/venv` and installs `requirements.txt`;
-4. adds `usb_max_current_enable=1` to `/boot/firmware/config.txt` — see
-   [A6](#a6-pi-5-specific-traps), this one actually matters for the camera;
-5. writes a `systemd` unit `autowing.service`, **left disabled**;
-6. prints what to do next.
+</div>
 
-Takes a few minutes, most of it the OpenCV wheel.
+```bash
+git clone https://github.com/OriRubin04/auto-wing-.git ~/auto-wing-
+less ~/auto-wing-/tools/install_pi.sh
+bash ~/auto-wing-/tools/install_pi.sh
+```
 
-> **If pip starts compiling OpenCV, stop it (Ctrl-C).** A source build takes
-> hours on a Pi and means PyPI had no wheel for your Python version. Fallback:
-> ```bash
-> sudo apt install -y python3-opencv
-> rm -rf ~/auto-wing-/venv
-> python3 -m venv --system-site-packages ~/auto-wing-/venv
-> ~/auto-wing-/venv/bin/pip install pymavlink numpy pyyaml
-> ```
-> The apt build is older OpenCV. CSRT is in it and CSRT is the default
-> tracker, so nothing is lost. The optional ViT backend needs ≥ 4.9 and will
-> log that it is unavailable and track on CSRT (CLAUDE.md §8) — which is what
-> it does on the default config anyway.
+<div dir="rtl">
 
-### A3. Find the camera
+הסקריפט אידמפוטנטי — אפשר להריץ אותו שוב בבטחה. הוא:
+
+1. מתקין חבילות apt‏ (`python3-venv`, `v4l-utils`, הספריות שגלגל ההתקנה של
+   OpenCV נקשר אליהן, וכותרות הפיתוח שחבילת `pymavlink` עשויה להזדקק להן);
+2. משכפל או מעדכן את המאגר ב‑`~/auto-wing-`;‏
+3. בונה סביבה וירטואלית ב‑`~/auto-wing-/venv` ומתקין את `requirements.txt`;‏
+4. מוסיף `usb_max_current_enable=1` ל‑`/boot/firmware/config.txt` — ראה סעיף
+   א6, זה לא קוסמטי, זה מה שקובע אם המצלמה תעבוד;
+5. כותב יחידת `systemd` בשם `autowing.service`, ומשאיר אותה **מושבתת**;
+6. מדפיס מה לעשות בשלב הבא.
+
+ההתקנה אורכת כמה דקות, רובן ההורדה והפריסה של OpenCV.‏
+
+> **אם pip מתחיל להדר את OpenCV מהמקור — עצור אותו ב‑Ctrl+C.** הידור מהמקור
+> אורך שעות על פאי, והוא קורה רק כשאין ב‑PyPI גלגל מתאים לגרסת הפייתון שלך.
+> הנפילה החלופית:
+
+</div>
+
+```bash
+sudo apt install -y python3-opencv
+rm -rf ~/auto-wing-/venv
+python3 -m venv --system-site-packages ~/auto-wing-/venv
+~/auto-wing-/venv/bin/pip install pymavlink numpy pyyaml
+```
+
+<div dir="rtl">
+
+> גרסת ה‑apt של OpenCV ישנה יותר. CSRT נמצא בה, ו‑CSRT הוא גלאי המעקב
+> שבברירת המחדל, כך שלא מאבדים כלום. מנגנון ה‑ViT האופציונלי דורש גרסה 4.9
+> ומעלה, ובהיעדרה הוא ירשום ביומן שאינו זמין וימשיך לעקוב עם CSRT
+> (CLAUDE.md סעיף 8) — כלומר בדיוק מה שהוא עושה בברירת המחדל בכל מקרה.
+
+### א3. זיהוי המצלמה
+
+</div>
 
 ```bash
 v4l2-ctl --list-devices
 ```
 
-A USB camera usually gives two nodes (`/dev/video0`, `/dev/video1`); the
-*first* is normally the capture one. The number is the `camera.index` in the
-config. Check it:
+<div dir="rtl">
+
+מצלמת USB מופיעה בדרך כלל כשני התקנים (`/dev/video0` ו‑`/dev/video1`), והראשון
+הוא בדרך כלל זה שמספק תמונה. המספר הזה הוא `camera.index` בקובץ ההגדרות.
+לבדיקה:
+
+</div>
 
 ```bash
 cd ~/auto-wing- && source venv/bin/activate
 python tools/camera_test.py
 ```
 
-It prints which indices open and what resolution they actually deliver.
-`_open_camera` picks `CAP_V4L2` on Linux by itself (`onboard/main.py:94`), so
-there is nothing to set for that.
+<div dir="rtl">
 
-### A4. Edit the config
+הסקריפט מדפיס אילו אינדקסים נפתחים ובאיזו רזולוציה הם מספקים תמונה בפועל.
+בלינוקס `_open_camera` בוחר `CAP_V4L2` בעצמו (`onboard/main.py:94`), ולכן אין
+מה להגדיר בעניין הזה.
+
+### א4. עריכת קובץ ההגדרות
+
+</div>
 
 ```bash
 nano ~/auto-wing-/config/config.yaml
 ```
 
-The four things that are different from your Windows/SITL copy:
+<div dir="rtl">
+
+ארבעת הדברים ששונים מהעותק שרץ אצלך על Windows ועל הסימולטור:
+
+</div>
 
 ```yaml
 camera:
-  index: 0                 # whatever A3 reported
-  width: 1280              # see the note below
+  index: 0                 # מה שסעיף א3 הראה
+  width: 1280              # ראה הערה למטה
   height: 720
 
 mavlink:
-  connection_string: "/dev/ttyUSB0"   # Part B decides this
-  baudrate: 921600                    # must match SERIAL2_BAUD on the FC
+  connection_string: "/dev/ttyUSB0"   # חלק ב׳ קובע את זה
+  baudrate: 921600                    # חייב להתאים ל-SERIAL2_BAUD בבקר הטיסה
 
 streaming:
-  host: "0.0.0.0"          # already correct
+  host: "0.0.0.0"          # כבר נכון
 ```
 
-**On resolution:** 640×480 gives a 4.5 m vehicle 10 px at 250 m, which is
-close to the floor where anything works at all (CLAUDE.md §6). 1280×720
-doubles that for free. The MJPEG fourcc that 720p needs over USB is already
-set (`onboard/main.py:105`) — without it the driver silently drops to ~5 fps
-instead of erroring. Watch `loop_ms` in the flight log after the change; if
-the Pi cannot hold the rate, go back to 640×480. The link is unaffected either
-way: `streaming.max_width` downscales the video for the GCS separately, so
-processing runs full-resolution while the radio carries a small frame.
+<div dir="rtl">
 
-On your laptop, in *its* `config/config.yaml`:
+**על הרזולוציה.** ברזולוציה 640×480 רכב באורך 4.5 מטר תופס עשרה פיקסלים
+בגובה 250 מטר, וזה קרוב לרצפה שמתחתיה שום דבר לא עובד (CLAUDE.md סעיף 6).
+מעבר ל‑1280×720 מכפיל את זה בחינם. דחיסת ה‑MJPEG שנדרשת ל‑720p על USB כבר
+מוגדרת בקוד (`onboard/main.py:105`) — בלעדיה הדרייבר צונח בשקט לחמש תמונות
+בשנייה במקום להחזיר שגיאה. אחרי השינוי עקוב אחרי `loop_ms` ביומן הטיסה; אם
+הפאי לא עומד בקצב, חזור ל‑640×480. הקישור לא נפגע כך או כך, כי
+`streaming.max_width` מקטין את הווידאו לתחנה הקרקעית בנפרד — העיבוד רץ ברזולוציה
+המלאה בעוד הרדיו נושא תמונה קטנה.
+
+במחשב הנייד, בקובץ ההגדרות **שלו**:
+
+</div>
 
 ```yaml
 gcs:
-  onboard_ip: "192.168.1.xxx"   # the Pi's address — `hostname -I` on the Pi
+  onboard_ip: "192.168.1.xxx"   # כתובת הפאי — הרץ `hostname -I` על הפאי
 ```
 
-### A5. First run, by hand
+<div dir="rtl">
 
-Not as a service yet — you want to see the log.
+### א5. הרצה ראשונה, ידנית
+
+לא כשירות, בשלב הזה. אתה רוצה לראות את היומן.
+
+</div>
 
 ```bash
 cd ~/auto-wing- && source venv/bin/activate
 python onboard/main.py
 ```
 
-Expected:
+<div dir="rtl">
+
+הפלט הצפוי:
+
+</div>
 
 ```
 Camera opened: index=0 resolution=1280x720
@@ -162,101 +217,122 @@ Heartbeat from sysid=1 compid=1
 Ready. Waiting for GCS target selection.
 ```
 
-No heartbeat → the wiring or the FC parameters are wrong. Part B.
+<div dir="rtl">
 
-Then on the laptop: `python gcs\gcs_client.py`, and click a target.
+אם אין פעימת לב (heartbeat) — החיווט או הפרמטרים בבקר הטיסה שגויים. ראה חלק ב׳.
 
-Ports, if a firewall is in the way:
+אחר כך, במחשב הנייד: `python gcs\gcs_client.py`, ולחץ על מטרה.
 
-| Where | Port | Purpose |
+הפורטים, אם חומת אש מפריעה:
+
+</div>
+
+<div dir="rtl">
+
+| היכן | פורט | לשם מה |
 |---|---|---|
-| Pi, inbound | 15000/udp | GCS `REGISTER` packet |
-| Pi, inbound | 15001/tcp | target select / stop |
-| Laptop, inbound | 15100/udp | video (Pi sends to `port + 100`) |
+| פאי, נכנס | 15000/udp | מנת ה‑`REGISTER` מהתחנה הקרקעית |
+| פאי, נכנס | 15001/tcp | בחירת מטרה ועצירה |
+| מחשב נייד, נכנס | 15100/udp | וידאו (הפאי שולח ל‑`port + 100`) |
 
-### A6. Pi 5 specific traps
+### א6. מלכודות ייחודיות לפאי 5
 
-- **USB current limit.** A Pi 5 that does not negotiate USB-PD — which
-  includes every Pi powered from a BEC through the GPIO pins or a plain 5 V
-  supply — caps *total* USB peripheral current at 600 mA. A USB camera can sit
-  right at that edge and the symptom is not an error; it is a camera that
-  vanishes mid-flight. `usb_max_current_enable=1` in `/boot/firmware/config.txt`
-  lifts the cap, and the installer adds it. Your 5 V supply then has to
-  actually deliver — see Part B.
-- **Heat.** The Pi 5 throttles at 85 °C and OpenCV will peg all four cores.
-  Fit the active cooler or a heatsink with real airflow. Check with
-  `vcgencmd measure_temp` and `vcgencmd get_throttled` (`0x0` is clean).
-- **No clock.** No RTC battery means flight-log timestamps are wrong until the
-  Pi sees a network. Harmless for the data, annoying for naming runs. A CR2032
-  on the RTC header fixes it if it bothers you.
-- **Undervoltage shows up as weirdness, not as a message.** If anything is
-  flaky, check `vcgencmd get_throttled` first.
+- **הגבלת זרם ב‑USB.** פאי 5 שאינו מנהל משא ומתן של USB-PD — וזה כל פאי
+  שמוזן מספק מתח רגיל או מ‑BEC דרך פיני ה‑GPIO — מגביל את הזרם הכולל לאביזרי
+  USB ל‑600 מילי־אמפר. מצלמת USB יושבת בדיוק על הגבול הזה, והתסמין אינו
+  שגיאה אלא מצלמה שנעלמת באמצע הטיסה. השורה `usb_max_current_enable=1` בקובץ
+  `/boot/firmware/config.txt` מסירה את התקרה, וסקריפט ההתקנה מוסיף אותה. מכאן
+  והלאה ספק המתח שלך צריך באמת לספק — ראה חלק ב׳, סעיף ב3.
+- **חום.** פאי 5 מוריד תדר ב‑85 מעלות, ו‑OpenCV יעמיס את כל ארבעת הליבות.
+  התקן את המאוורר הפעיל, או גוף קירור עם זרימת אוויר אמיתית. בדיקה:
+  `vcgencmd measure_temp` ו‑`vcgencmd get_throttled`, כאשר `0x0` הוא תקין.
+- **אין שעון.** אין סוללת שעון, ולכן חותמות הזמן ביומני הטיסה שגויות עד
+  שהפאי רואה רשת. זה לא פוגע בנתונים אבל מקשה על זיהוי הרצות. סוללת CR2032
+  במחבר ה‑RTC פותרת את זה אם זה מפריע.
+- **מתח נמוך מתבטא בהתנהגות מוזרה, לא בהודעה.** אם משהו מתנהג לא יציב, הדבר
+  הראשון לבדוק הוא `vcgencmd get_throttled`.‏
 
-### A7. Autostart, once it works
+### א7. הפעלה אוטומטית, אחרי שהכול עובד
+
+</div>
 
 ```bash
 sudo systemctl enable --now autowing
-journalctl -u autowing -f        # live log
+journalctl -u autowing -f        # יומן בזמן אמת
 sudo systemctl disable --now autowing
 ```
 
-Leave it disabled until you have flown it by hand at least once. The unit is
-`Restart=always`, which is what you want in the air and a nuisance on the
-bench.
+<div dir="rtl">
+
+השאר את השירות מושבת עד שהרצת את התוכנה ידנית לפחות פעם אחת. היחידה מוגדרת
+`Restart=always`, שזה מה שאתה רוצה באוויר ומטרד על השולחן.
+
+</div>
 
 ---
 
-## Part B — wiring
+<div dir="rtl">
 
-### B1. Parts
+## חלק ב׳ — חיווט
 
-| Part | Note |
+### ב1. חלקים
+
+| חלק | הערה |
 |---|---|
-| Raspberry Pi 5, 8 GB | with the active cooler |
-| USB camera | the one you have been testing with |
-| 5 V BEC, **5 A** | from the main battery, dedicated to the Pi |
-| USB↔TTL serial adapter, 3.3 V | CP2102 or FTDI. **Option A below** |
-| 6-pin JST-GH cable | for the FC's TELEM2 port |
+| Raspberry Pi 5, 8GB | עם המאוורר הפעיל |
+| מצלמת USB | זו שאיתה בדקת עד עכשיו |
+| ממיר מתח (BEC) ל‑5V, **5A** | מהסוללה הראשית, מוקדש לפאי |
+| ממיר USB↔TTL ברמת 3.3V | דגם CP2102 או FTDI. ראה אפשרות א׳ למטה |
+| כבל JST-GH בן שישה פינים | למחבר TELEM2 בבקר הטיסה |
 
-### B2. Data: Pi ↔ flight controller
+### ב2. נתונים: פאי אל בקר הטיסה
 
-Three options. The pin numbers for the TELEM port are the Pixhawk standard —
-**check your board's own silkscreen or docs**, pin 1 is the marked one:
+שלוש אפשרויות. מספרי הפינים של מחבר ה‑TELEM הם התקן של Pixhawk — **בדוק את
+ההדפס על הלוח שלך או את התיעוד שלו**, פין 1 הוא זה המסומן:
+
+</div>
 
 ```
-FC TELEM1 / TELEM2 (6-pin JST-GH)
+FC TELEM1 / TELEM2  (6-pin JST-GH)
   1 = +5V     2 = TX     3 = RX     4 = CTS     5 = RTS     6 = GND
 ```
 
-#### Option A — USB↔TTL adapter (recommended for flight)
+<div dir="rtl">
+
+#### אפשרות א׳ — ממיר USB↔TTL (מומלץ לטיסה)
+
+</div>
 
 ```
   Raspberry Pi 5                  USB-TTL adapter              FC TELEM2
   ┌──────────────┐                ┌───────────┐                ┌─────────┐
   │   USB-A      ├────── USB ─────┤           │                │         │
-  │              │                │   TXD  ───┼────────────────►│ 3  RX   │
+  │              │                │   TXD  ───┼───────────────►│ 3  RX   │
   │              │                │   RXD  ◄──┼────────────────┤ 2  TX   │
   │              │                │   GND  ───┼────────────────┤ 6  GND  │
   │              │                │   VCC   × │  leave unused  │ 1  +5V  │  ×
   └──────────────┘                └───────────┘                └─────────┘
 ```
 
-- **TX goes to RX, RX goes to TX.** Crossed. Getting this backwards gives you
-  exactly the symptom of a dead port: no heartbeat, no error.
-- **Leave the adapter's VCC disconnected** and leave TELEM pin 1 alone. The Pi
-  has its own supply; tying two 5 V rails together backfeeds one of them.
-- GND **must** be connected. It is the shared reference the signals are
-  measured against, and without it the link works unreliably or not at all.
-- Both sides are 3.3 V logic, so no level shifter. Do not substitute a 5 V
-  adapter.
-- Device: `/dev/ttyUSB0`. Confirm with `ls -l /dev/ttyUSB*` after plugging in.
+<div dir="rtl">
 
-Pin it down so it cannot wiggle out — this adapter is now a flight-critical
-connector.
+- **TX הולך אל RX, ו‑RX הולך אל TX.** מוצלב. חיבור הפוך נותן בדיוק את התסמין
+  של מחבר מת: אין פעימת לב ואין שגיאה.
+- **השאר את פין ה‑VCC של הממיר מנותק**, ואל תיגע בפין 1 של ה‑TELEM. לפאי יש
+  ספק משלו, וחיבור שני מקורות 5V זה לזה מזרים מתח בחזרה לאחד מהם.
+- GND **חייב** להיות מחובר. זו נקודת הייחוס שביחס אליה נמדדים האותות, ובלעדיה
+  הקישור יעבוד באופן לא יציב או לא יעבוד כלל.
+- שני הצדדים עובדים בלוגיקה של 3.3V, ולכן אין צורך בממיר רמות. אל תחליף
+  בממיר של 5V.‏
+- שם ההתקן: `/dev/ttyUSB0`. אמת עם `ls -l /dev/ttyUSB*` אחרי החיבור.
 
-#### Option B — the Pi's own GPIO UART
+קבע את הממיר במקומו כך שלא יוכל להישמט — הוא מחבר קריטי לטיסה מרגע זה.
 
-One less part, two more problems.
+#### אפשרות ב׳ — ה‑UART של ה‑GPIO בפאי
+
+חלק אחד פחות, שתי בעיות יותר.
+
+</div>
 
 ```
   Pi 40-pin header                    FC TELEM2
@@ -265,7 +341,11 @@ One less part, two more problems.
   pin 6   GND           ──────────────  6  GND
 ```
 
-Setup:
+<div dir="rtl">
+
+ההגדרה:
+
+</div>
 
 ```bash
 sudo raspi-config     # Interface Options > Serial Port
@@ -275,119 +355,145 @@ sudo reboot
 ls -l /dev/serial0
 ```
 
-That last line is the point. On the Pi 5 under Bookworm `/dev/serial0` does not
-reliably point where it did on a Pi 4 — reports have it aliasing `ttyAMA10`
-rather than `ttyAMA0`, and the fix depends on the OS release. Use whatever the
-symlink resolves to as `connection_string`, and if the symlink is missing,
-Option A instead of fighting it.
+<div dir="rtl">
 
-#### Option C — plain USB cable, Pi → FC's USB port
+השורה האחרונה היא כל העניין. בפאי 5 תחת Bookworm‏ `/dev/serial0` אינו מצביע
+בהכרח לאותו מקום שבו היה בפאי 4 — יש דיווחים שהוא מפנה ל‑`ttyAMA10` ולא
+ל‑`ttyAMA0`, והפתרון תלוי בגרסת מערכת ההפעלה. השתמש במה שהקישור הסימבולי
+מצביע עליו בפועל בתור `connection_string`, ואם הקישור חסר — עבור לאפשרות א׳
+במקום להילחם בזה.
 
-Device `/dev/ttyACM0`, baud 115200, and **no FC parameters to change at all** —
-ArduPilot's USB serial is SERIAL0 and already speaks MAVLink2. That makes it
-the fastest way to get a first heartbeat on the bench.
+#### אפשרות ג׳ — כבל USB רגיל מהפאי אל מחבר ה‑USB של בקר הטיסה
 
-Not for flight: the FC's USB port is the one you want free for a laptop at the
-field, the connector is not retention-locked, and on some boards plugging or
-unplugging it resets the autopilot.
+שם ההתקן `/dev/ttyACM0`, קצב 115200, ו**אין שום פרמטר לשנות בבקר הטיסה** —
+חיבור ה‑USB של ArduPilot הוא SERIAL0 והוא מדבר MAVLink2 מראש. זו הדרך המהירה
+ביותר לקבל פעימת לב ראשונה על השולחן.
 
-### B3. Power
+לא לטיסה: מחבר ה‑USB של הבקר הוא זה שאתה רוצה שיישאר פנוי למחשב נייד בשדה,
+המחבר אינו נעול מפני שליפה, ובחלק מהלוחות חיבור או ניתוק שלו מאפס את הבקר.
+
+### ב3. מתח
+
+</div>
 
 ```
   Main battery ──┬── ESC ── motor
                  │
                  ├── FC power module ──► flight controller
                  │
-                 └── 5 V / 5 A BEC ────► Pi 5
+                 └── 5V / 5A BEC ──────► Raspberry Pi 5
                                           USB-C,  or
                                           GPIO pin 2 or 4 (+5V) and pin 6 (GND)
 ```
 
-- **One dedicated BEC for the Pi.** Not the FC's 5 V rail, not the TELEM 5 V
-  pin — that pin is typically limited to about 1 A and shared with whatever
-  else is on it. A Pi 5 is rated 5 A at 5 V; it will not draw that with one
-  camera, but it brownouts on a supply that sags, and a brownout mid-flight
-  loses the tracker.
-- Powering through the GPIO 5 V pins works and is common, and it bypasses both
-  PD negotiation (hence `usb_max_current_enable=1`, A6) and the Pi's inrush
-  protection. Clean BEC, short thick leads.
-- **Common ground between Pi and FC** — already there via TELEM pin 6. Do not
-  omit it on the theory that both are grounded to the battery.
-- Put the camera on its own USB port, not behind a hub.
+<div dir="rtl">
 
-### B4. Flight-controller parameters
+- **ממיר מתח אחד מוקדש לפאי.** לא מפסי ה‑5V של בקר הטיסה ולא מפין ה‑5V של
+  מחבר ה‑TELEM — הפין הזה מוגבל בדרך כלל לאמפר אחד בקירוב, והוא משותף לכל מה
+  שמחובר אליו. פאי 5 מדורג ל‑5 אמפר ב‑5 וולט; הוא לא יצרוך את זה עם מצלמה
+  אחת, אבל הוא נופל על ספק שמתחתיו המתח צונח, ונפילה כזאת באוויר מאבדת את
+  המעקב.
+- הזנה דרך פיני ה‑5V של ה‑GPIO עובדת ומקובלת, והיא מדלגת גם על משא ומתן
+  ה‑USB-PD (ומכאן `usb_max_current_enable=1` בסעיף א6) וגם על הגנת זרם הפתיחה
+  של הפאי. לכן: ממיר מתח נקי, וכבלים קצרים ועבים.
+- **אדמה משותפת בין הפאי לבקר הטיסה** — היא כבר קיימת דרך פין 6 של ה‑TELEM.‏
+  אל תדלג עליה בהנחה ששניהם מוארקים לסוללה.
+- חבר את המצלמה לפורט USB משלה, לא דרך מפצל.
 
-For TELEM2 = `SERIAL2`. In Mission Planner: **Config → Full Parameter List**.
-Using TELEM1 instead? Then `SERIAL1_*`.
+### ב4. פרמטרים בבקר הטיסה
 
-| Parameter | Value | Why |
+עבור TELEM2, כלומר `SERIAL2`. ב‑Mission Planner‏: **Config → Full Parameter
+List**. משתמש ב‑TELEM1 במקום? אז `SERIAL1_*`.‏
+
+| פרמטר | ערך | מדוע |
 |---|---|---|
 | `SERIAL2_PROTOCOL` | `2` | MAVLink 2 |
-| `SERIAL2_BAUD` | `921` | 921600, must match `baudrate` in config.yaml. Drop to `115` if you see dropouts |
-| `BRD_SER2_RTSCTS` | `0` | flow control off — only 3 wires are connected |
+| `SERIAL2_BAUD` | `921` | כלומר 921600, חייב להתאים ל‑`baudrate` בקובץ ההגדרות. הורד ל‑`115` אם יש נשירות |
+| `BRD_SER2_RTSCTS` | `0` | ביטול בקרת זרימה — חוברו שלושה חוטים בלבד |
 
-Then reboot the FC and re-run A5. You should get a heartbeat.
+אחר כך אפס את בקר הטיסה והרץ שוב את סעיף א5. אתה אמור לקבל פעימת לב.
 
-**RC override acceptance.** The autopilot ignores `RC_CHANNELS_OVERRIDE` from a
-system ID that is not its configured GCS. `pymavlink` sends as sysid 255, which
-is also the default on the FC side, so normally there is nothing to do. If the
-heartbeat is fine but the aircraft ignores the commands, that check is the first
-suspect: the parameter is `SYSID_MYGCS` up to 4.6 and was renamed
-`MAV_GCS_SYSID` in 4.7 (`SYSID_ENFORCE` became a `MAV_OPTIONS` bit at the same
-time). ArduPilot's own RC-input page still shows the old names, so trust your
-firmware's parameter list over any document — including this one.
+**קבלת פקודות RC override.** בקר הטיסה מתעלם מהודעות `RC_CHANNELS_OVERRIDE`
+שמגיעות ממזהה מערכת שאינו התחנה הקרקעית המוגדרת שלו. `pymavlink` שולח כמזהה
+255, שהוא גם ברירת המחדל בצד הבקר, ולכן בדרך כלל אין מה לשנות. אם פעימת הלב
+תקינה אבל המטוס מתעלם מהפקודות — הבדיקה הזאת היא החשד הראשון: שם הפרמטר הוא
+`SYSID_MYGCS` עד גרסה 4.6 והוא שונה ל‑`MAV_GCS_SYSID` בגרסה 4.7 (ובאותה הזדמנות
+`SYSID_ENFORCE` הפך לביט בתוך `MAV_OPTIONS`). דף התיעוד של ArduPilot בנושא
+קלט RC עדיין מציג את השמות הישנים, ולכן תן אמון ברשימת הפרמטרים של הקושחה שלך
+ולא במסמך — כולל המסמך הזה.
 
-**`RC_OVERRIDE_TIME`** is the safety net worth knowing about: if the MAVLink
-override stream stops — Pi crash, cable out, software killed — the autopilot
-falls back to the real RC receiver within a few seconds on its own.
+**הפרמטר `RC_OVERRIDE_TIME`** הוא רשת הביטחון ששווה להכיר: אם זרם הפקודות
+נעצר — קריסת הפאי, כבל שנשלף, תוכנה שנהרגה — בקר הטיסה חוזר מעצמו למקלט ה‑RC
+האמיתי בתוך שניות.
 
-### B5. Bench test, in this order
+### ב5. בדיקה על השולחן, בסדר הזה
 
-**Props off. All of it.**
+**בלי מדחפים. בכלל.**
 
-1. FC on USB to the laptop (Mission Planner) *and* Pi on TELEM2 at the same
-   time. Both links can be live together.
-2. Transmitter on. **Confirm a mode switch pulls the aircraft back to MANUAL
-   or FBWA, and confirm it still does while the Pi is commanding.** This is
-   your abort and it is the first thing to test, not the last.
-3. Run `onboard/main.py`, click a target in the GCS. In Mission Planner watch:
-   - mode changes to **ACRO**;
-   - Flight Data → Status: `ch1in`/`ch2in` move with the target;
-   - the control surfaces move the right way. Point the camera so the target
-     is to the left and check the aircraft wants to roll left.
-4. Move the target to the centre and confirm the ailerons settle rather than
-   hunting. That is the PID; tune `control.roll_pid` from there.
-5. `logs/<timestamp>/flight.csv` — check `loop_ms`, `confidence`,
-   `track_score` and `target_w`. `target_w` is also how you will find out
-   whether shadows are inflating the size estimate in real footage, which no
-   simulation here can tell you.
+1. בקר הטיסה מחובר ב‑USB למחשב הנייד (Mission Planner) **ובמקביל** הפאי מחובר
+   ל‑TELEM2. שני הקישורים יכולים לעבוד יחד.
+2. משדר דלוק. **ודא שמפסק מצבים מחזיר את המטוס ל‑MANUAL או ל‑FBWA, וודא
+   שהוא עושה את זה גם בעודו הפאי שולח פקודות.** זו האפשרות שלך לנטוש, וזה
+   הדבר הראשון לבדוק, לא האחרון.
+3. הרץ את `onboard/main.py` ולחץ על מטרה בתחנה הקרקעית. ב‑Mission Planner עקוב
+   אחרי:
+   - המצב עובר ל‑**ACRO**;
+   - במסך Flight Data → Status, הערכים `ch1in` ו‑`ch2in` נעים עם המטרה;
+   - משטחי ההיגוי נעים לכיוון הנכון. כוון את המצלמה כך שהמטרה תהיה בשמאל
+     התמונה, וודא שהמטוס רוצה להתגלגל שמאלה.
+4. העבר את המטרה למרכז וודא שהמאזנות מתייצבות ולא מתנדנדות. זה ה‑PID, ומשם
+   מכווננים את `control.roll_pid`.‏
+5. פתח את `logs/<timestamp>/flight.csv` ובדוק את `loop_ms`, `confidence`,‏
+   `track_score` ו‑`target_w`. השדה `target_w` הוא גם הדרך שבה תגלה אם צללים
+   מנפחים את הערכת הגודל בצילום אמיתי — דבר שאף סימולציה כאן לא יכולה לומר לך.
 
-### B6. Two things to know before the first flight
+### ב6. שני דברים שחשוב לדעת לפני הטיסה הראשונה
 
-- **Zero stick does not level the wings in ACRO.** It holds the current bank
-  (CLAUDE.md §3). Levelling is done explicitly from the `ATTITUDE` reading.
-- **Lost lock currently commands roll = 0**, i.e. hold bank, rather than
-  switching to RTL. That is a deliberate deferral, not an oversight, but it
-  means a lost target in a turn keeps the turn. Fly with altitude and with a
-  finger on the mode switch.
+- **מקל באפס אינו מיישר את הכנפיים במצב ACRO.** הוא מחזיק את זווית הגלגול
+  הנוכחית (CLAUDE.md סעיף 3). היישור נעשה במפורש מקריאת `ATTITUDE`.‏
+- **איבוד נעילה מצווה כרגע גלגול אפס**, כלומר החזקת זווית הגלגול הקיימת,
+  ולא מעבר ל‑RTL. זו דחייה מכוונת ולא פספוס, אבל המשמעות היא שמטרה שאובדת
+  בתוך פנייה ממשיכה את הפנייה. טוס עם מרווח גובה ועם אצבע על מפסק המצבים.
+
+</div>
 
 ---
 
-## Making your own image
+<div dir="rtl">
 
-Once a card is set up, configured and flown, that card *is* the image:
+## לבנות אימג׳ בעצמך
 
-- **From the Pi**, to a second card in a USB reader:
-  ```bash
-  sudo apt install -y rpi-clone      # or: git clone https://github.com/billw2/rpi-clone
-  sudo rpi-clone sda
-  ```
-- **From a laptop**, card in a reader:
-  - Linux/macOS: `sudo dd if=/dev/sdX of=autowing.img bs=4M status=progress`
-  - Windows: Win32DiskImager → *Read*
+ברגע שכרטיס אחד מוגדר, מכוונן וטס — הכרטיס הזה **הוא** האימג׳:
 
-Shrink it with [PiShrink](https://github.com/Drewsif/PiShrink) before storing
-it; an un-shrunk image is the full card size, mostly zeroes.
+- **מהפאי**, אל כרטיס שני בקורא USB:‏
 
-Worth doing once things work — restoring a known-good card at the field beats
-debugging an install there.
+</div>
+
+```bash
+sudo apt install -y rpi-clone      # או: git clone https://github.com/billw2/rpi-clone
+sudo rpi-clone sda
+```
+
+<div dir="rtl">
+
+- **ממחשב**, כשהכרטיס בקורא:
+  - בלינוקס או ב‑macOS‏: `sudo dd if=/dev/sdX of=autowing.img bs=4M status=progress`
+  - ב‑Windows‏: Win32DiskImager, פעולת *Read*
+
+כדאי לכווץ את התוצאה עם [PiShrink](https://github.com/Drewsif/PiShrink) לפני
+שמירה; אימג׳ לא מכווץ הוא בגודל הכרטיס המלא, רובו אפסים.
+
+שווה לעשות את זה פעם אחת ברגע שהמערכת עובדת. לשחזר כרטיס תקין בשדה עדיף על
+לאתר תקלת התקנה בשדה.
+
+</div>
+
+---
+
+<div dir="rtl">
+
+גרסה אנגלית של אותו מדריך: אין. זה הקובץ היחיד, כדי שלא ייווצרו שתי גרסאות
+שמתפצלות. שמות פקודות, פרמטרים ופלט תוכנה נשארו באנגלית מפני שכך הם מופיעים
+על המסך.
+
+</div>
