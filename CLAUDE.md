@@ -32,11 +32,35 @@ Consequences that follow from this, and must not be traded away:
 - Do not "improve" reliability by adding a GCS round-trip to the control path.
   No remote computation, no ack-before-act, no telemetry-gated decisions.
 
-Current state: after target selection the aircraft *does* keep flying with the
-link down. But the control loop still pays a network tax — `check_registration()`
-blocks ~10 ms every frame, and `send_frame()` does JPEG encode plus `sendto`
-inline. Roughly 40% of the frame budget. Moving both to a background thread is
-outstanding work, and is what fully honours this rule.
+Current state: **done.** Both halves of the network tax are off the loop.
+
+- `check_registration()` is a non-blocking `recvfrom` on a non-blocking socket.
+  It used to carry a 10 ms timeout and pay it on nearly every frame, since the
+  common case is that no packet is waiting.
+- `send_frame()` now only computes `last_scale` and hands a copy of the frame
+  to a sender thread. The resize, the JPEG encode and the `sendto` all happen
+  there. Measured at 1280x720 on x86: the loop went from **1.19 ms to 0.25 ms**
+  per streamed frame, and that 0.25 ms is flat whether the GCS is listening,
+  gone, or a blackhole address. It is one memcpy and nothing else.
+
+`last_scale` is deliberately computed on the loop rather than on the thread: it
+depends only on the frame shape and `max_width`, and `_handle_gcs_message`
+reads it to map a click back to frame pixels. Setting it from the thread would
+be a race on the one value that decides where the operator actually pointed.
+
+An earlier version of this section put the tax at "roughly 40% of the frame
+budget". That was the 10 ms `check_registration()`, and it has not been true
+since that was fixed. The remaining win measured at under 1 ms on x86. The
+reason to take it anyway is that the encode is the part that grows on the Pi's
+weaker NEON path, and that a stalled `sendto` can no longer reach the loop at
+all — which is the rule, not the millisecond.
+
+**Not worth doing: shrinking the UDP chunk size.** It is listed as a known
+issue on PR #1 and the arithmetic does not support it. A ~30 kB JPEG is ~21 IP
+fragments at a 1500 byte MTU, or ~23 packets if chunked at 1400 by hand, and a
+JPEG needs every byte either way — one lost packet loses the frame in both
+schemes. Robustness against loss needs FEC or a lower quality setting, not a
+smaller chunk. Fewer, larger packets at least cost fewer syscalls.
 
 ## 2. Flight safety ordering
 
