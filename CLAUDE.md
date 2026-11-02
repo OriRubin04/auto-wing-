@@ -214,7 +214,34 @@ shutter, JPEG artefacts, haze, parallax or real vehicle signature. It is enough
 to rule things out, not enough to pick a flight configuration. Real footage
 through `tools/benchmark_detector.py` is still the gate.
 
-## 9. Practical notes
+## 9. Verify before asserting
+
+**Operator's standing instruction: research and check before giving an answer,
+every time.** Hardware behaviour, device names, parameter names and API
+signatures all move, and this project is now at the point where a wrong one
+gets wired into an aircraft.
+
+The rule, concretely:
+
+- Check a primary source before stating a fact about hardware, an OS release,
+  ArduPilot parameters or a library API. Not memory.
+- If the source cannot be reached, say that it could not be reached and that
+  the claim is unverified. Do not fill the gap from memory and present the
+  result as settled.
+- Do not let uncertainty about a detail drive a design choice. Resolve the
+  detail.
+
+That last one is from a real failure here. The Pi guide recommended buying a
+USB-TTL adapter and routed the whole wiring section around it, because
+`/dev/serial0` on a Pi 5 was unclear. The actual answer is one search away: on
+a Pi 5 `serial0` aliases the separate 3-pin debug connector, the GPIO14/15
+UART is **`/dev/ttyAMA0`**, and the Linux console already sits on the debug
+connector — so unlike Pi 3/4 there is nothing to free in `raspi-config`, and
+the direct three-wire connection every companion-computer setup uses is both
+correct and simpler. An unverified worry had been turned into a shopping list
+and an extra flight-critical connector.
+
+## 10. Practical notes
 
 - `config/config.yaml` has **uncommitted local modifications** on the operator's
   machine. Prefer code defaults (`cfg.get(...)`) over editing it, to avoid pull

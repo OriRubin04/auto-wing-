@@ -93,23 +93,36 @@ print(f"  TrackerCSRT {'yes' if hasattr(cv2, 'TrackerCSRT_create') else 'NO'}"
       f"   TrackerVit {'yes' if hasattr(cv2, 'TrackerVit_create') else 'no (optional)'}")
 PY
 
-# --------------------------------------------------- 4. USB current on Pi 5 --
-# A Pi 5 that cannot negotiate USB-PD - which is every Pi fed from a BEC or a
-# plain 5V supply - limits TOTAL USB peripheral current to 600 mA.  A USB
-# camera sits close to that line, and the failure mode is not an error message,
-# it is a camera that disappears in flight.
+# ------------------------------------------- 4. boot config (USB + UART) --
+# usb_max_current_enable: a Pi 5 that cannot negotiate USB-PD - which is every
+#   Pi fed from a BEC - limits TOTAL USB peripheral current to 600 mA.  A USB
+#   camera sits close to that line and the failure mode is not an error
+#   message, it is a camera that disappears in flight.
+# dtparam=uart0=on: brings up the GPIO14/15 UART as /dev/ttyAMA0, which is how
+#   the Pi talks to the flight controller.  NOT uart0_console, which would put
+#   the Linux console on those pins and fight us for the port.  On a Pi 5 the
+#   console already lives on the separate 3-pin debug connector, so there is
+#   nothing to free first - unlike every Pi 3/4 guide.
+#   Note /dev/serial0 is NOT this port on a Pi 5; it aliases the debug
+#   connector.  main.py is pointed at /dev/ttyAMA0 explicitly.
 [ -f "$BOOT_CONFIG" ] || BOOT_CONFIG="/boot/config.txt"
 if [ -f "$BOOT_CONFIG" ]; then
-    if grep -qE '^\s*usb_max_current_enable\s*=\s*1' "$BOOT_CONFIG"; then
-        say "usb_max_current_enable already set in $BOOT_CONFIG"
-    else
-        say "Setting usb_max_current_enable=1 in $BOOT_CONFIG (needs a reboot)"
-        printf '\n# auto-wing: lift the 600mA USB cap when not on a PD supply.\n# Your 5V supply must actually deliver: a dedicated 5V/5A BEC.\nusb_max_current_enable=1\n' \
-            | sudo tee -a "$BOOT_CONFIG" >/dev/null
-        REBOOT_NEEDED=1
-    fi
+    # Match the WHOLE setting, not the key before the first '=': splitting
+    # "dtparam=uart0=on" on '=' gives "dtparam", which matches an unrelated
+    # "dtparam=audio=on" already in the file - and then the UART line is
+    # silently skipped and there is no /dev/ttyAMA0 to reach the FC.
+    for line in "usb_max_current_enable=1" "dtparam=uart0=on"; do
+        if grep -qFx "$line" "$BOOT_CONFIG"; then
+            say "$line already set in $BOOT_CONFIG"
+        else
+            say "Adding $line to $BOOT_CONFIG (needs a reboot)"
+            printf '\n# auto-wing\n%s\n' "$line" | sudo tee -a "$BOOT_CONFIG" >/dev/null
+            REBOOT_NEEDED=1
+        fi
+    done
 else
-    warn "No config.txt found - skipping the USB current setting."
+    warn "No config.txt found - skipping the USB-current and UART settings."
+    warn "Without dtparam=uart0=on there will be no /dev/ttyAMA0 to reach the FC."
 fi
 
 # ----------------------------------------------------- 5. serial port access --
