@@ -75,9 +75,8 @@ say "Installing Python requirements (the OpenCV wheel is the slow part)"
 # instead of starting a multi-hour source build that looks like a hang.
 if ! "$VENV_DIR/bin/pip" install --only-binary=opencv-contrib-python -r "$REPO_DIR/requirements.txt"; then
     warn "No prebuilt OpenCV wheel for this Python ($("$VENV_DIR/bin/python" -V))."
-    warn "Falling back to the system OpenCV from apt - see the note in"
-    warn "docs/raspberry-pi-setup.md section A2.  Older OpenCV; CSRT (the"
-    warn "default tracker) is present, the optional ViT backend is not."
+    warn "Falling back to the system OpenCV from apt.  Older build; CSRT"
+    warn "(the default tracker) is present, the optional ViT backend is not."
     sudo apt-get install -y python3-opencv
     rm -rf "$VENV_DIR"
     python3 -m venv --system-site-packages "$VENV_DIR"
@@ -105,7 +104,7 @@ if [ -f "$BOOT_CONFIG" ]; then
         say "usb_max_current_enable already set in $BOOT_CONFIG"
     else
         say "Setting usb_max_current_enable=1 in $BOOT_CONFIG (needs a reboot)"
-        printf '\n# auto-wing: lift the 600mA USB cap when not on a PD supply.\n# Your 5V supply must actually deliver - see docs/raspberry-pi-setup.md B3.\nusb_max_current_enable=1\n' \
+        printf '\n# auto-wing: lift the 600mA USB cap when not on a PD supply.\n# Your 5V supply must actually deliver: a dedicated 5V/5A BEC.\nusb_max_current_enable=1\n' \
             | sudo tee -a "$BOOT_CONFIG" >/dev/null
         REBOOT_NEEDED=1
     fi
@@ -148,28 +147,17 @@ sudo systemctl daemon-reload
 # ------------------------------------------------------------------- done ----
 cat <<EOF
 
-$(printf '\033[1;32m')Installed.$(printf '\033[0m')  Next, in order:
+$(printf '\033[1;32m')Installed.$(printf '\033[0m')  Now continue in the guide:
+$REPO_DIR/docs/raspberry-pi-setup.md
 
-  1. Find the camera index:
-         v4l2-ctl --list-devices
-         cd $REPO_DIR && source venv/bin/activate && python tools/camera_test.py
-
-  2. Edit the config for this aircraft:
-         nano $REPO_DIR/config/config.yaml
-     camera.index, camera.width/height, mavlink.connection_string,
-     mavlink.baudrate.  Section A4 of docs/raspberry-pi-setup.md.
-
-  3. Wire the Pi to the flight controller and set SERIAL2_* on the FC.
-     Part B of docs/raspberry-pi-setup.md.  Props off.
-
-  4. Run it by hand first and read the log:
-         cd $REPO_DIR && source venv/bin/activate && python onboard/main.py
-
-  5. Only once that works, autostart on boot:
-         sudo systemctl enable --now autowing
-         journalctl -u autowing -f
+  step 3   wire the Pi to the flight controller
+  step 4   set SERIAL2_* on the flight controller
+  step 5   edit config/config.yaml on the Pi
+  step 6   bench test, props off:
+               cd $REPO_DIR && source venv/bin/activate && python onboard/main.py
+  step 7   only then, autostart:  sudo systemctl enable --now autowing
 
 EOF
 if [ "${REBOOT_NEEDED:-0}" = "1" ]; then
-    printf '\033[1;33m[!] Reboot before step 1 - config.txt changed.  sudo reboot\033[0m\n\n'
+    printf '\033[1;33m[!] Reboot now - config.txt changed.  sudo reboot\033[0m\n\n'
 fi
