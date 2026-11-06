@@ -92,6 +92,22 @@ class FlatTargetsHoldLock(unittest.TestCase):
             locked += det.state == det.STATE_TRACKING and det.fail_count == 0
         self.assertGreaterEqual(locked, 28, f"held the window on {locked} of 30 still frames")
 
+    def test_holds_a_window_on_a_dark_noisy_facade(self):
+        # Fifth Pi run, at night: even the whole box scored 0.57-0.74 on the
+        # next frame, under the fixed 0.7 bar.
+        img, rng = _facade(1)
+        img = (img.astype(np.float32) * 0.18).astype(np.uint8)
+        det = ObjectDetector({})
+        x, y = 60 + 4 * 120, 60 + 2 * 110
+        noisy = lambda: cv2.cvtColor(
+            np.clip(img + rng.normal(0, 9, img.shape), 0, 255).astype(np.uint8), cv2.COLOR_GRAY2BGR)
+        self.assertTrue(det.select_target(x + 17, y + 20, noisy()))
+        locked = 0
+        for _ in range(30):
+            det.process(noisy())
+            locked += det.state == det.STATE_TRACKING and det.fail_count == 0
+        self.assertGreaterEqual(locked, 28, f"held the window on {locked} of 30 still frames")
+
 
 if __name__ == '__main__':
     unittest.main()

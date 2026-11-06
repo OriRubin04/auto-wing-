@@ -270,6 +270,18 @@ class StabilizedTracker:
     # path above is unchanged for them.
     TEXTURE_MIN = 20.0
 
+    # ...and the bar is set per target.  In a dark, noisy picture even the
+    # right box scores well under 0.7 (fifth Pi run, windows at night: whole
+    # box 0.57-0.74 one frame after selection), and a fixed blur to clean
+    # that up let wrong locks through on run 2 (3 -> 68 frames).  So the
+    # first BASE_FRAMES updates after a selection - where CSRT has had no
+    # time to wander - measure what "the same thing" scores in this scene,
+    # and the bar is BASE_FRAC of their median, never above VERIFY_MIN and
+    # never below BASE_MIN.
+    BASE_FRAMES = 3
+    BASE_FRAC = 0.85
+    BASE_MIN = 0.45
+
     # The reference the check uses is not frozen at selection: a vehicle that
     # turned ~8 degrees no longer matched it, and was lost for good (found in
     # review; TurningVehicle test).  Each frame that matches at REFRESH_MIN
@@ -371,6 +383,16 @@ class StabilizedTracker:
         cw, ch = max(4, w // 2), max(4, h // 2)
         return x + (w - cw) // 2, y + (h - ch) // 2, cw, ch
 
+    def _bar(self, m):
+        """The score below which the box counts as off target."""
+        base = getattr(self, '_base', None)
+        if base is None:
+            return self.VERIFY_MIN
+        if len(base) < self.BASE_FRAMES:
+            base.append(m)
+            return min(self.VERIFY_MIN, self.BASE_MIN)
+        return min(self.VERIFY_MIN, max(self.BASE_MIN, self.BASE_FRAC * float(np.median(base))))
+
     def _match(self, frame, box):
         """Best correlation of the selected centre within half a box of `box`."""
         x, y, w, h = self._centre(box)
@@ -455,6 +477,7 @@ class StabilizedTracker:
         if ok:
             x, y, w, h = (int(v) for v in bbox)
             self._good = (frame, (x, y, w, h))
+            self._base = []
             self._whole = False
             cx, cy, cw, ch = self._centre((x, y, w, h))
             self._whole = float(self._grey(frame[cy:cy + ch, cx:cx + cw]).std()) < self.TEXTURE_MIN
@@ -488,7 +511,8 @@ class StabilizedTracker:
             return False, None, score
         x, y, w, h = (int(v) for v in rect)
         real = (x + self._off[0], y + self._off[1], w, h)
-        if self._match(frame, real) < self.VERIFY_MIN:
+        m = self._match(frame, real)
+        if m < self._bar(m):
             self._fails += 1
             return False, None, score
         self._fails = 0

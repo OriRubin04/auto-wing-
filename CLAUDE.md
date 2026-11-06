@@ -330,6 +330,15 @@ the reference instead (0.83-0.90 there). Replayed: windows 1 frame -> held
 until the next click; labelled runs 1 and 2 unchanged or better (run 2 false
 lock 11 -> 3, 11 fewer hits).
 
+At night that was not enough (fifth Pi run): the picture is dark and noisy and
+even the whole box scored 0.57-0.74 on the next frame. A fixed blur before
+the NCC cleaned that up but let wrong locks through on run 2 (3 -> 68), so the
+bar is per target instead: the first 3 updates after a selection measure what
+"the same thing" scores in this scene, and the bar is 0.85x their median,
+clamped to 0.45..0.7. Runs 1 and 2 are identical (their targets score >= 0.82,
+so the bar stays 0.7); night windows went from 1 locked frame to held while in
+view (e.g. 1/62 -> 62/62).
+
 Open, deliberately: the search only runs during the 20-frame coast, so a
 target out of view for longer still needs a re-click. And every threshold
 here is from indoor handheld footage - recalibrate on a vehicle from altitude
