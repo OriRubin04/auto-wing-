@@ -72,9 +72,71 @@ class SaliencyDetector:
     # ------------------------------------------------------------------ #
 
     def find_nearest(self, frame, ref_x, ref_y, max_dist=None):
-        """Nearest salient blob to (ref_x, ref_y), or None."""
+        """
+        The object under (ref_x, ref_y) if there is one, else the nearest
+        salient blob, else None.
+        """
+        obj = self.object_at(frame, ref_x, ref_y)
+        if obj is not None:
+            return obj
         cands = self.propose(frame, ref_x, ref_y, max_dist)
         return cands[0][0] if cands else None
+
+    # The object the click landed on: the pixels around the click that stand
+    # out from the local background the same way (brighter, or darker) and at
+    # least half as strongly.  This is what sizes the init box.
+    #
+    # Why not the DoG blob: its wide blur is sigma 6, so it sees structure up
+    # to ~12 px.  A car from a 20th floor (~40x80 px) shows as its rim and its
+    # highlights in fragments, and the nearest fragment was a 5x3 px glint on
+    # the roof - a 24 px box on one part of the car (third Pi run).  Measured
+    # on that run's 8 car selections, this gives 0.87-1.0 of the true length
+    # on 6 and 0.47 / 0.79 on the two moving cars at the edge of the light;
+    # the DoG hint gave 0.06-0.5.
+    OBJ_BG_SIGMA = 25      # local background; objects up to ~100 px across
+    OBJ_FRACTION = 0.5     # how much of the click's contrast still counts
+    OBJ_SNAP = 10          # px: the click may land just off the object
+    OBJ_WINDOW = 160       # px: half-width searched; a region that reaches
+                           # its edge has leaked into the ground and is refused
+
+    def object_at(self, frame, ref_x, ref_y):
+        """(x, y, w, h) of the object under the point, or None."""
+        h, w = frame.shape[:2]
+        r = self.OBJ_WINDOW
+        x0, y0 = max(0, int(ref_x) - r), max(0, int(ref_y) - r)
+        x1, y1 = min(w, int(ref_x) + r), min(h, int(ref_y) + r)
+        if x1 - x0 < 16 or y1 - y0 < 16:
+            return None
+        roi = frame[y0:y1, x0:x1]
+        grey = np.float32(cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY) if roi.ndim == 3 else roi)
+        diff = grey - cv2.GaussianBlur(grey, (0, 0), self.OBJ_BG_SIGMA)
+
+        # Seed on what stands out most within OBJ_SNAP of the click.
+        smooth = cv2.GaussianBlur(diff, (0, 0), 2)
+        px, py, s = int(ref_x) - x0, int(ref_y) - y0, self.OBJ_SNAP
+        ax, ay = max(0, px - s), max(0, py - s)
+        near = np.abs(smooth[ay:py + s + 1, ax:px + s + 1])
+        if near.size == 0:
+            return None
+        dy, dx = np.unravel_index(int(np.argmax(near)), near.shape)
+        sx, sy = ax + dx, ay + dy
+        contrast = float(smooth[sy, sx])
+        if abs(contrast) < 1e-3:
+            return None
+
+        sign = 1.0 if contrast > 0 else -1.0
+        mask = (sign * diff > self.OBJ_FRACTION * abs(contrast)).astype(np.uint8) * 255
+        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k)
+        _, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+        lab = labels[sy, sx]
+        if lab == 0:
+            return None
+        bx, by, bw, bh, area = stats[lab]
+        leaked = bx == 0 or by == 0 or bx + bw >= x1 - x0 or by + bh >= y1 - y0
+        if leaked or area > self.max_area_frac * (x1 - x0) * (y1 - y0):
+            return None
+        return x0 + int(bx), y0 + int(by), int(bw), int(bh)
 
     def propose(self, frame, ref_x, ref_y, max_dist=None):
         """

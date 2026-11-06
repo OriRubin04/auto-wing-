@@ -323,19 +323,22 @@ class ObjectDetector:
         target's own size, which is what keeps the terrain out of the patch.
         """
         if hint is None:
-            return self.box_fallback
-        edge = int(round(self.box_scale * max(hint[2], hint[3])))
-        return max(self.box_min, min(edge, self.box_max))
+            return self.box_fallback, self.box_fallback
+        # Each side on its own: a car from above is ~2:1, and a square on its
+        # long side is half road.
+        def side(n):
+            return max(self.box_min, min(int(round(self.box_scale * n)), self.box_max))
+        return side(hint[2]), side(hint[3])
 
     @staticmethod
     def _make_patch(frame, cx, cy, size):
-        """Return a clamped (x, y, w, h) patch centred on (cx, cy)."""
+        """Return a clamped (x, y, w, h) patch centred on (cx, cy).  size = (w, h)."""
         h, w = frame.shape[:2]
-        size = max(1, min(int(size), w, h))   # a box bigger than the frame is not a box
-        half = size // 2
-        x = max(0, min(cx - half, w - size))
-        y = max(0, min(cy - half, h - size))
-        return (x, y, size, size)
+        bw = max(1, min(int(size[0]), w))   # a box bigger than the frame is not a box
+        bh = max(1, min(int(size[1]), h))
+        x = max(0, min(cx - bw // 2, w - bw))
+        y = max(0, min(cy - bh // 2, h - bh))
+        return (x, y, bw, bh)
 
     def _start(self, frame, bbox, tracker):
         """Init `tracker` on `bbox` and make it the live one.  True on success."""

@@ -178,6 +178,28 @@ there and a flat 24 px box is what actually flies. Not harmful on the evidence
 at those sizes will look like it does nothing, which is confusing rather than
 wrong.
 
+### Large targets: the hint was a speck (third Pi run)
+
+Cars from a 20th floor are ~40x80 px. The DoG sees structure up to ~12 px, so
+a car is its rim and its glints in fragments, and the nearest fragment - often
+a 5x3 px reflection - set the box: the 24 px floor on one part of the car.
+`SaliencyDetector.object_at` now sizes the box first: the pixels around the
+click that stand out from a sigma-25 background the same way, at least half as
+strongly, snapped to within 10 px of the click; refused if it leaks to the
+window edge, and the DoG blob is the fallback. The box is no longer square -
+each side is 1.25x the object's own side, clamped to 24..96.
+
+On the run's 8 car selections it gets 0.87-1.0 of the true length on 6 (DoG
+hint: 0.06-0.5). Replayed on the Pi: the old box drifted onto the road and
+kept reporting lock (sel 19, 21); the new one stays on the car or reports lost.
+Cost: CSRT on the bigger box, 29.6 -> 39.0 ms median per tracked frame. Seen
+but not fixed: on the Pi CSRT's scale estimate sometimes grows the box well
+past the car (sel 19, ~60x130).
+
+Synthetic 8-30 px targets come out at their true size (the DoG hint was
++10-15 px), so below ~19 px the box is the 24 px floor as before. Not yet
+checked on real footage from altitude.
+
 ## 8. Tracking backends, and the argument that did not survive
 
 `onboard/trackers.py` holds two backends behind one interface.
