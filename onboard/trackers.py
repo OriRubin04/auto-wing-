@@ -205,11 +205,24 @@ class StabilizedTracker:
     tracker then sees a near-still scene and only has to follow the residual
     plus the target's own motion.  Boxes go out in real frame coordinates.
 
+    The running total only ever grows while the aircraft follows a moving
+    vehicle (the ground streams past at the vehicle's speed), and the
+    stabilised canvas is only frame-sized.  So when the box nears the edge of
+    the canvas the inner tracker is re-based: re-initialised on the real frame
+    at the real box, and the total reset to zero.  Without this a vehicle at
+    15 m/s from 250 m slid off the canvas in ~15 s - one that plain CSRT holds
+    indefinitely.
+
     Also contains the opencv_contrib CSRT corner bug: a failed update() stores
     (-1,-1) as the target centre, so the next update searches the top-left
-    corner and usually "finds" something there.  After any failure the inner
+    corner and usually "finds" something there.  After a failure the inner
     tracker is re-initialised from the last frame and box it got right, so a
-    single blurred frame costs one frame, not the target.
+    single blurred frame costs one frame, not the target.  A re-init costs
+    about as much as an update, so during a longer run of failures the retries
+    back off (failures 1, 2, 4, 8, 16) and the frames in between are reported
+    lost without touching the poisoned tracker.  Only for trackers with no
+    score: the bug is CSRT's, and ViT's score-driven failures are a signal the
+    detector should keep seeing.
     """
 
     SMALL_W = 320            # width of the copy used for motion estimation
@@ -223,6 +236,12 @@ class StabilizedTracker:
     # uncompensated, 32 at this threshold.
     MIN_RESPONSE = 0.2
 
+    # A rejected frame is skipped, not dropped: the next one is measured
+    # against the last frame that was measured, so a jump across a blurred
+    # frame is still counted.  After this many rejections in a row the scene
+    # has probably changed for good, and the reference moves on.
+    MAX_SKIPPED = 3
+
     def __init__(self, inner):
         self.inner = inner
         self.graded = getattr(inner, 'graded', False)
@@ -235,27 +254,40 @@ class StabilizedTracker:
 
     def _start(self, frame):
         self._prev = None if frame is None else self._small(frame)
+        self._skipped = 0
+        self._rebase(frame, None)
+        self._fails = 0                  # consecutive failed updates
+
+    def _rebase(self, frame, box):
+        """Make `frame` the stabilised canvas: zero offset, `box` the last good."""
         self._off = (0, 0)               # accumulated camera shift, whole px
         self._acc = np.zeros(2)          # same, before rounding
-        self._good = None                # (stabilised frame, box) last ok
-        self._failed = False
+        self._good = None if box is None else (frame, box)
 
     def _small(self, frame):
-        g = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if frame.ndim == 3 else frame
+        # Shrink first, then drop colour: the conversion is per pixel.
         s = self.SMALL_W / float(frame.shape[1])
-        return np.float32(cv2.resize(g, None, fx=s, fy=s, interpolation=cv2.INTER_AREA))
+        g = cv2.resize(frame, None, fx=s, fy=s, interpolation=cv2.INTER_AREA)
+        if g.ndim == 3:
+            g = cv2.cvtColor(g, cv2.COLOR_BGR2GRAY)
+        return np.float32(g)
 
     def _shift(self, frame):
-        """Camera shift since the previous frame, in full-res px."""
+        """Camera shift since the last measured frame, in full-res px."""
         cur = self._small(frame)
-        prev, self._prev = self._prev, cur
+        prev = self._prev
         if prev is None or prev.shape != cur.shape:
+            self._prev = cur
             return np.zeros(2)
         if self._win is None or self._win.shape != cur.shape:
             self._win = cv2.createHanningWindow(cur.shape[::-1], cv2.CV_32F)
         (dx, dy), resp = cv2.phaseCorrelate(prev, cur, self._win)
         if not (resp >= self.MIN_RESPONSE and np.isfinite(dx) and np.isfinite(dy)):
+            self._skipped += 1
+            if self._skipped > self.MAX_SKIPPED:
+                self._prev, self._skipped = cur, 0
             return np.zeros(2)
+        self._prev, self._skipped = cur, 0
         return np.array([dx, dy]) * (frame.shape[1] / float(cur.shape[1]))
 
     def _stabilise(self, frame):
@@ -280,16 +312,44 @@ class StabilizedTracker:
         self._off = tuple(int(round(v)) for v in self._acc)
         view = self._stabilise(frame)
 
-        if self._failed and self._good is not None:
-            self.inner.init(*self._good)     # undo the corner bug
+        if self._fails and not self.graded:
+            # Corner bug: never update a CSRT whose last update failed.
+            # Retry from the last good frame on failures 1, 2, 4, 8, ...
+            if self._good is None or self._fails & (self._fails - 1):
+                self._fails += 1
+                return False, None, None
+            self.inner.init(*self._good)
+
         ok, rect, score = self.inner.update(view)
-        self._failed = not ok
         if not ok or rect is None:
+            self._fails += 1
             return False, None, score
+        self._fails = 0
 
         x, y, w, h = (int(v) for v in rect)
-        self._good = (view, (x, y, w, h))
-        return True, (x + self._off[0], y + self._off[1], w, h), score
+        real = (x + self._off[0], y + self._off[1], w, h)
+        # Re-base only when it is the offset that put the box near the edge.
+        # A target genuinely at the edge of the real frame gains nothing from
+        # it, and would pay a re-init every frame.
+        if (self._near_edge((x, y, w, h), frame.shape)
+                and not self._near_edge(real, frame.shape)):
+            self._rebase(frame, real)
+            self.inner.init(frame, real)
+        else:
+            self._good = (view, (x, y, w, h))
+        return True, real, score
+
+    @staticmethod
+    def _near_edge(box, shape):
+        """True when the inner tracker's search window would leave the canvas.
+
+        CSRT searches a square of side w + 3*sqrt(w*h) around the box, i.e.
+        about 2x the box edge each side for a square target."""
+        x, y, w, h = box
+        margin = 2 * max(w, h)
+        cx, cy = x + w / 2.0, y + h / 2.0
+        fh, fw = shape[:2]
+        return not (margin <= cx <= fw - margin and margin <= cy <= fh - margin)
 
 
 def make_tracker(cfg):

@@ -85,7 +85,99 @@ class CameraJump(unittest.TestCase):
                             f"box at ({cx:.0f},{cy:.0f}), target at {truth}")
 
 
+class FollowedVehicle(unittest.TestCase):
+
+    def test_holds_a_vehicle_the_camera_keeps_centred(self):
+        # The main mission profile: a vehicle drives over the ground and the
+        # aircraft keeps it centred, so the ground streams past at the
+        # vehicle's speed while the target sits still in the frame.  Plain
+        # CSRT holds this forever; a stabiliser that only ever accumulates
+        # the ground's motion slides the target off its own canvas.
+        # Ground with structure at the scale the motion estimate works at
+        # (it sees a 320 px copy).  Fine noise alone averages out to flat grey
+        # there, and the only thing left to correlate is the target itself.
+        rng = np.random.default_rng(1)
+        coarse = rng.integers(70, 190, size=(125, 375), dtype=np.uint8)
+        world = cv2.resize(coarse, (3000, 1000), interpolation=cv2.INTER_CUBIC)
+        world = cv2.cvtColor(cv2.GaussianBlur(world, (0, 0), 2), cv2.COLOR_GRAY2BGR)
+        tgt = [700, 500]
+        cam = [tgt[0] - FW // 2, tgt[1] - FH // 2]
+        tracker = _start(world, tgt, cam)
+        tracker.init(_view(world, cam, tgt),
+                     (FW // 2 - BOX // 2, FH // 2 - BOX // 2, BOX, BOX))
+
+        for i in range(200):                       # 6 px/frame, 1200 px total
+            tgt[0] += 6
+            cam[0] = tgt[0] - FW // 2
+            ok, rect, _ = tracker.update(_view(world, cam, tgt))
+            self.assertTrue(ok, f"lost the vehicle at frame {i}")
+            cx, cy = _centre(rect)
+            self.assertLess(np.hypot(cx - FW // 2, cy - FH // 2), 6.0,
+                            f"frame {i}: box at ({cx:.0f},{cy:.0f})")
+
+
 class FailedUpdate(unittest.TestCase):
+
+    def test_a_blank_frame_in_the_middle_of_a_jump_does_not_lose_the_jump(self):
+        # Shake is when frames blur out.  If the camera jumps across a frame
+        # that cannot be measured, the jump still has to be accounted for:
+        # measure the next good frame against the last good one.
+        world, target = _world()
+        cam = [560, 440]
+        tracker = _start(world, target, cam)
+        for _ in range(3):
+            tracker.update(_view(world, cam))
+
+        tracker.update(np.full((FH, FW, 3), 128, np.uint8))   # unmeasurable
+        cam[0] += 60
+        cam[1] -= 40
+        tgt = list(target)
+        for i in range(10):                       # target drives, see above
+            tgt[0] += 2
+            ok, rect, _ = tracker.update(_view(world, cam, tgt))
+            truth = (tgt[0] - cam[0], tgt[1] - cam[1])
+            self.assertTrue(ok, f"lost the target {i} frames after the jump")
+            cx, cy = _centre(rect)
+            self.assertLess(np.hypot(cx - truth[0], cy - truth[1]), 6.0,
+                            f"box at ({cx:.0f},{cy:.0f}), target at {truth}")
+
+    def test_a_run_of_failures_does_not_reinit_every_frame(self):
+        # Re-initialising costs about as much as an update.  During a long
+        # failure the detector is coasting anyway; retry, but back off.
+        world, target = _world()
+        cam = (560, 440)
+        tracker = _start(world, target, cam)
+        calls = []
+        real_init = tracker.inner.init
+        tracker.inner.init = lambda *a: calls.append(1) or real_init(*a)
+        tracker.update(_view(world, cam))
+
+        blank = np.full((FH, FW, 3), 128, np.uint8)
+        for _ in range(20):                        # coast_limit frames
+            ok, _, _ = tracker.update(blank)
+            self.assertFalse(ok)
+        self.assertLessEqual(len(calls), 6, f"{len(calls)} re-inits in 20 failed frames")
+
+    def test_a_scored_tracker_is_not_reinitialised_on_failure(self):
+        # The corner bug is CSRT's.  A tracker with a real score (ViT) fails
+        # for a reason the detector should keep counting, so its failures go
+        # through untouched.
+        from onboard.trackers import PixelTracker, StabilizedTracker
+        world, target = _world()
+        cam = (560, 440)
+        inner = PixelTracker('CSRT')
+        inner.graded = True                     # stands in for ViT here
+        tracker = StabilizedTracker(inner)
+        tx, ty = target[0] - cam[0], target[1] - cam[1]
+        tracker.init(_view(world, cam), (tx - BOX // 2, ty - BOX // 2, BOX, BOX))
+        calls = []
+        real_init = inner.init
+        inner.init = lambda *a: calls.append(1) or real_init(*a)
+
+        blank = np.full((FH, FW, 3), 128, np.uint8)
+        for _ in range(5):
+            tracker.update(blank)
+        self.assertEqual(calls, [])
 
     def test_recovers_in_place_after_one_failed_frame(self):
         world, target = _world()

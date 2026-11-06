@@ -251,14 +251,27 @@ the cause was not the tracker's appearance model. Two things, both measured:
   320 px grey copy) before the inner tracker sees the frame.
 - **CSRT has a corner bug.** A failed `update()` stores (-1,-1) as the centre
   before returning false, so the next update searches the top-left corner and
-  usually reports ok there - which also resets `fail_count`, so coasting and
-  re-acquisition never fire. The wrapper re-inits from the last good frame
-  after any failure.
+  usually reports ok there. The wrapper never updates a CSRT whose last update
+  failed: it re-inits from the last good frame, backing off on failures
+  1, 2, 4, 8, 16. Note what this does *not* change: CSRT still reports ok after
+  a re-init, now near the last good box rather than in the corner, so
+  `fail_count` still resets and still says little about whether the lock is
+  right (no lost-lock signal, above).
+
+One trap the first version fell into, caught in review: the accumulated
+offset only grows while the aircraft follows a moving vehicle, because the
+ground streams past at the vehicle's speed. The stabilised canvas is
+frame-sized, so the target slid off it - a 15 m/s vehicle at 250 m was lost in
+~15 s where plain CSRT held it indefinitely. The wrapper now re-bases (re-init
+on the real frame, offset back to zero) when the offset pushes the box near
+the canvas edge. `tests/` covers it; any change to the stabiliser has to keep
+the followed-vehicle test green, not just the shake ones.
 
 Replayed on the same clip: old code reproduces all 6 live losses at the same
 frames; new code holds 5 and loses the sixth (heavy blur) 100 frames later.
-`MIN_RESPONSE = 0.2` is calibrated against LK flow on that clip. Tests:
-`python -m unittest discover tests`.
+`MIN_RESPONSE = 0.2` is calibrated against LK flow on that clip. Cost on the
+Pi: +5.4 ms median per update for the first version, against a tracking loop
+that already ran at 33.6 ms. Tests: `python -m unittest discover tests`.
 
 ## 9. Verify before asserting
 
