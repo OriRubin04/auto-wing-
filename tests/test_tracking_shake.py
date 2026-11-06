@@ -203,5 +203,111 @@ class FailedUpdate(unittest.TestCase):
                             f"box at ({cx:.0f},{cy:.0f}), target at {truth}")
 
 
+def _blind(tracker):
+    """Make the camera-motion estimate miss every jump, as it did on the
+    second Pi run when the picture rotated or smeared (2312, 2488, 2802)."""
+    tracker._shift = lambda frame: np.zeros(2)
+
+
+class LostLock(unittest.TestCase):
+    # Second Pi run: after a loss CSRT kept reporting success on blank
+    # ceiling, on a lookalike lamp, or off the frame, and the box "wandered".
+    # CSRT has no usable lost-lock signal, so the wrapper has to check the
+    # box itself against what was selected.
+
+    def test_reports_lost_when_the_box_lands_on_other_ground(self):
+        world, target = _world()
+        cam = [560, 440]
+        tracker = _start(world, target, cam)
+        for _ in range(3):
+            self.assertTrue(tracker.update(_view(world, cam))[0])
+
+        _blind(tracker)
+        cam[0] += 150                  # beyond CSRT's reach, and not measured
+        cam[1] -= 100
+        frame = _view(world, cam)
+        truth = (target[0] - cam[0], target[1] - cam[1])
+        for i in range(5):
+            ok, rect, _ = tracker.update(frame)
+            if ok:
+                cx, cy = _centre(rect)
+                self.assertLess(np.hypot(cx - truth[0], cy - truth[1]), 6.0,
+                                f"frame {i}: reports a lock at ({cx:.0f},{cy:.0f}), "
+                                f"target is at {truth}")
+
+    def test_finds_the_target_again_after_a_jump_it_could_not_follow(self):
+        world, target = _world()
+        cam = [560, 440]
+        tracker = _start(world, target, cam)
+        for _ in range(3):
+            tracker.update(_view(world, cam))
+
+        _blind(tracker)
+        cam[0] += 150
+        cam[1] -= 100
+        frame = _view(world, cam)
+        truth = (target[0] - cam[0], target[1] - cam[1])
+        oks = []
+        for i in range(5):
+            ok, rect, _ = tracker.update(frame)
+            oks.append(ok)
+        self.assertTrue(ok, f"never found it again: {oks}")
+        cx, cy = _centre(rect)
+        self.assertLess(np.hypot(cx - truth[0], cy - truth[1]), 6.0,
+                        f"box at ({cx:.0f},{cy:.0f}), target at {truth}")
+
+    def test_finds_a_large_target_again(self):
+        # A big box takes the coarse-to-fine search path (the template is
+        # shrunk first), which a 24 px box never reaches.
+        world, target = _world()
+        cv2.circle(world, target, 28, (20, 20, 20), -1)
+        cv2.circle(world, target, 12, (200, 200, 200), -1)
+        cam = [560, 440]
+        tracker, _ = make_tracker({})
+        tx, ty = target[0] - cam[0], target[1] - cam[1]
+        self.assertTrue(tracker.init(_view(world, cam), (tx - 32, ty - 32, 64, 64)))
+        for _ in range(3):
+            tracker.update(_view(world, cam))
+
+        _blind(tracker)
+        cam[0] += 150
+        cam[1] -= 100
+        frame = _view(world, cam)
+        truth = (target[0] - cam[0], target[1] - cam[1])
+        for _ in range(5):
+            ok, rect, _ = tracker.update(frame)
+        self.assertTrue(ok, "never found it again")
+        cx, cy = _centre(rect)
+        self.assertLess(np.hypot(cx - truth[0], cy - truth[1]), 4.0,
+                        f"box at ({cx:.0f},{cy:.0f}), target at {truth}")
+
+    def test_does_not_pick_one_of_two_lookalikes(self):
+        # The second run's light bar: a row of identical lamps.  When the
+        # search finds the target's pattern in more than one place it cannot
+        # know which is the one selected, and must stay lost rather than guess.
+        world, target = _world()
+        twin = (target[0] - 150, target[1] - 90)      # earlier in raster order
+        patch = world[target[1] - 30:target[1] + 30, target[0] - 30:target[0] + 30].copy()
+        cv2.circle(patch, (30, 30), 7, (20, 20, 20), -1)
+        world[twin[1] - 30:twin[1] + 30, twin[0] - 30:twin[0] + 30] = patch
+        cam = [560, 440]
+        tracker = _start(world, target, cam)
+        for _ in range(3):
+            tracker.update(_view(world, cam))
+
+        _blind(tracker)
+        cam[0] += 150
+        cam[1] -= 100
+        frame = _view(world, cam)
+        truth = (target[0] - cam[0], target[1] - cam[1])
+        for i in range(5):
+            ok, rect, _ = tracker.update(frame)
+            if ok:
+                cx, cy = _centre(rect)
+                self.assertLess(np.hypot(cx - truth[0], cy - truth[1]), 6.0,
+                                f"frame {i}: locked onto the lookalike at "
+                                f"({cx:.0f},{cy:.0f}), target is at {truth}")
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -115,9 +115,9 @@ class ObjectDetector:
        switch.
     4. If the primary fails for max_fails×2 consecutive frames → hand the last
        known box to the pixel tracker and carry on with that (once per target).
-    5. If the pixel tracker then fails for the same number of frames → try one
-       re-acquisition within 120 px of the last known position.  Otherwise
-       enter SEARCHING.
+    5. If the pixel tracker then fails for the same number of frames → enter
+       SEARCHING.  Re-acquisition happens inside the tracker during those
+       frames, by appearance (StabilizedTracker._search), not here.
 
     Step 4 is why the primary is a tracker that can report its own uncertainty:
     a handover can only be triggered by a tracker able to say "I lost it".
@@ -282,23 +282,14 @@ class ObjectDetector:
                 # target, hand the last known box to pixel tracking and let it
                 # carry on from there.
                 if not self._handover(frame):
-                    # Try re-acquisition near last known position
-                    ref_cx, ref_cy = self._bbox_center(self.last_bbox)
-                    new_bbox = self.proposer.find_nearest(frame, ref_cx, ref_cy, max_dist=120)
-                    if new_bbox is not None:
-                        nx, ny, nw, nh = new_bbox
-                        centre_x = nx + nw // 2
-                        centre_y = ny + nh // 2
-                        patch = self._make_patch(frame, centre_x, centre_y,
-                                                 self._box_size(new_bbox))
-                        self._start(frame, patch, self._tracker)
-                        self.last_bbox = patch
-                        self.fail_count = 0
-                        logger.info(f"Re-acquired; {self._tracker.name} reinitialised")
-                    else:
-                        logger.warning("Tracker lost target — entering SEARCHING")
-                        self.state = self.STATE_SEARCHING
-                        return None, self.state, annotated
+                    # No re-acquisition on "whatever stands out nearby": on
+                    # the second Pi run that re-initialised onto a table, a
+                    # vase and a shirt, and reported a clean lock on each.
+                    # The tracker wrapper already searches for the selected
+                    # target itself during the coast (StabilizedTracker).
+                    logger.warning("Tracker lost target — entering SEARCHING")
+                    self.state = self.STATE_SEARCHING
+                    return None, self.state, annotated
 
         # Annotate
         if self.last_bbox:

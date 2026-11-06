@@ -2,7 +2,8 @@
 """
 Offline detector benchmark.
 
-Runs the REAL ObjectDetector pipeline (proposal backend + CSRT + re-acquisition)
+Runs the REAL ObjectDetector pipeline (proposal backend + tracker, with its own
+lost-lock check and re-acquisition)
 over a recorded clip, so backends can be compared like for like without flying.
 
 Usage
@@ -20,7 +21,6 @@ Usage
 What it reports
 ---------------
   lock / coast / lost frames   how much of the clip the tracker held the target
-  re-acquisition attempts+hits whether recovery after a CSRT failure works
   proposal call timing         cost of the backend itself
   annotated output video       for eyeballing what it actually latched onto
 
@@ -137,7 +137,6 @@ def main():
 
     if not detector.select_target(click_x, click_y, frame):
         raise SystemExit("select_target failed - tracker could not initialise")
-    select_calls = detector.proposer.calls        # calls used by selection itself
 
     writer = None
     out_path = args.out
@@ -197,9 +196,6 @@ def main():
         writer.release()
 
     prop = detector.proposer
-    reacq_calls = prop.calls - select_calls
-    reacq_hits = prop.hits - (1 if select_calls and prop.hits else 0)
-    reacq_hits = max(0, reacq_hits)
 
     def stat(vals):
         if not vals:
@@ -217,10 +213,6 @@ def main():
         print(f"  lock (tracking)       {n_lock:5d}  ({100.0*n_lock/n_frames:5.1f}%)")
         print(f"  coast (CSRT failing)  {n_coast:5d}  ({100.0*n_coast/n_frames:5.1f}%)")
     print(f"  target fully lost at  {lost_at if lost_at else 'never'}")
-    print("-" * 62)
-    print(f"  re-acquisition calls  {reacq_calls}")
-    print(f"  re-acquisition hits   {reacq_hits}"
-          + (f"  ({100.0*reacq_hits/reacq_calls:.0f}%)" if reacq_calls else ""))
     print("-" * 62)
     print(f"  proposal latency      {stat(prop.times_ms)}")
     print(f"  process() latency     {stat(process_ms)}")

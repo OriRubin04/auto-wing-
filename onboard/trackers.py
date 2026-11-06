@@ -242,6 +242,43 @@ class StabilizedTracker:
     # has probably changed for good, and the reference moves on.
     MAX_SKIPPED = 3
 
+    # Lost-lock check, because CSRT has none: after a loss on the second Pi
+    # run it kept reporting success on blank ceiling, a lookalike lamp or off
+    # the frame ("wandering").  The box is compared with what was selected:
+    # normalised cross-correlation of the CENTRE half of the init patch,
+    # searched within half a box of the reported position.  Below VERIFY_MIN
+    # the update is reported as a failure.
+    #
+    # Centre only, because the box is bigger than the target (INIT_BOX_MIN):
+    # for a vehicle the ground under it changes every few frames, and on the
+    # whole patch the followed-vehicle test fell to 0.52.  On the centre it
+    # stays >= 0.83 while a box landed on other ground scores ~0.57.
+    #
+    # Labelled frame by frame on both Pi runs (2903 frames on target, 1407
+    # off).  At 0.7: run 1 catches 89% of wrong frames with no false alarm;
+    # run 2 catches 92% and flags 48 of 1882 correct frames, scattered (runs
+    # of 1-3, nearly all on a ~12 px spot) - each costs one frame of coasting.
+    VERIFY_MIN = 0.7
+
+    # Re-acquisition after a loss: the same centre patch is searched for
+    # within SEARCH_RADIUS px of where the last good box should now be.  The
+    # jumps that broke the lock on the second run were 96-364 px.  Accepting a
+    # match anywhere in that area needs a higher bar than checking one box,
+    # and the match must be unique: no second place within UNIQUE_MARGIN of
+    # it.  A row of identical lamps, or a dark-over-light edge that a black
+    # shirt over a chair repeats, is a guess, not a find.
+    #
+    # Replayed against the labels, previous code -> this (with the detector's
+    # nearest-blob re-acquisition removed): run 2, selections 2-5, frames
+    # locked on the wrong thing 310 -> 0, on target 938 -> 1040, "lost" while
+    # the target was in view 4 -> 192 (honest, but not yet found again).
+    # Run 1: wrong-lock frames 34 -> 10, on target unchanged.  Selection 1 of
+    # run 2 is left out: its labels are marginal (box beside the puck).
+    SEARCH_RADIUS = 320
+    FOUND_MIN = 0.85
+    UNIQUE_MARGIN = 0.1
+    COARSE_PX = 16
+
     def __init__(self, inner):
         self.inner = inner
         self.graded = getattr(inner, 'graded', False)
@@ -300,17 +337,110 @@ class StabilizedTracker:
                               flags=cv2.INTER_NEAREST,
                               borderMode=cv2.BORDER_REPLICATE)
 
+    @staticmethod
+    def _grey(img):
+        return np.float32(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img)
+
+    @staticmethod
+    def _centre(box):
+        """The centre half of a box, (x, y, w, h)."""
+        x, y, w, h = box
+        cw, ch = max(4, w // 2), max(4, h // 2)
+        return x + (w - cw) // 2, y + (h - ch) // 2, cw, ch
+
+    def _match(self, frame, box):
+        """Best correlation of the selected centre within half a box of `box`."""
+        x, y, w, h = self._centre(box)
+        m = max(box[2], box[3]) // 2
+        fh, fw = frame.shape[:2]
+        xa, ya = max(x - m, 0), max(y - m, 0)
+        xb, yb = min(x + w + m, fw), min(y + h + m, fh)
+        if xb - xa < w or yb - ya < h:
+            return -1.0                  # the box has left the frame
+        t = self._tmpl
+        if t.shape != (h, w):
+            t = cv2.resize(t, (w, h), interpolation=cv2.INTER_AREA)
+        return float(cv2.matchTemplate(self._grey(frame[ya:yb, xa:xb]), t,
+                                       cv2.TM_CCOEFF_NORMED).max())
+
+    def _search(self, frame):
+        """After a loss: look for the selected centre around where the last
+        good box should be now.  The box, or None."""
+        if self._good is None:
+            return None
+        gx, gy, w, h = self._good[1]
+        # Where the last good box's centre should be now, in real coordinates.
+        px, py = gx + self._off[0] + w // 2, gy + self._off[1] + h // 2
+        t = self._tmpl
+        th, tw = t.shape
+        r = self.SEARCH_RADIUS
+        fh, fw = frame.shape[:2]
+        xa, ya = max(px - tw // 2 - r, 0), max(py - th // 2 - r, 0)
+        xb, yb = min(px + tw // 2 + r, fw), min(py + th // 2 + r, fh)
+        if xb - xa < tw or yb - ya < th:
+            return None
+        win = self._grey(frame[ya:yb, xa:xb])
+
+        # Coarse pass on a shrunk copy.  On the Pi the cost follows the area
+        # searched, not the template: ~22 ms for the full 664 px window at
+        # any template size, 7.5 ms at half, ~2 ms at a third.  So always at
+        # least half, and down until the template is COARSE_PX across.  A
+        # coarse template that is too small to be unique only makes the
+        # search give up (uniqueness), never accept: FOUND_MIN is checked at
+        # full resolution below.
+        s = min(0.5, self.COARSE_PX / float(min(tw, th)))
+        if s < 1.0:
+            ws = cv2.resize(win, None, fx=s, fy=s, interpolation=cv2.INTER_AREA)
+            ts = cv2.resize(t, (max(4, int(round(tw * s))), max(4, int(round(th * s)))),
+                            interpolation=cv2.INTER_AREA)
+        else:
+            ws, ts = win, t
+        if ws.shape[0] < ts.shape[0] or ws.shape[1] < ts.shape[1]:
+            return None
+        res = cv2.matchTemplate(ws, ts, cv2.TM_CCOEFF_NORMED)
+        _, best, _, (bx, by) = cv2.minMaxLoc(res)
+        # Only if it is unique: blank out the peak and look for a runner-up.
+        sh, sw = ts.shape
+        cv2.rectangle(res, (bx - sw, by - sh), (bx + sw, by + sh), -1.0, -1)
+        if res.max() > best - self.UNIQUE_MARGIN:
+            return None
+
+        # Fine pass at full resolution around the coarse peak.
+        pad = int(np.ceil(1.0 / s)) + 2
+        fx, fy = int(bx / s), int(by / s)
+        ref = win[max(fy - pad, 0):fy + th + pad, max(fx - pad, 0):fx + tw + pad]
+        if ref.shape[0] < th or ref.shape[1] < tw:
+            return None
+        res = cv2.matchTemplate(ref, t, cv2.TM_CCOEFF_NORMED)
+        _, best, _, (qx, qy) = cv2.minMaxLoc(res)
+        if best < self.FOUND_MIN:
+            return None
+        cx = xa + max(fx - pad, 0) + qx + tw // 2
+        cy = ya + max(fy - pad, 0) + qy + th // 2
+        return (cx - w // 2, cy - h // 2, w, h)
+
     def init(self, frame, bbox):
         self._start(frame)
         ok = self.inner.init(frame, bbox)
         if ok:
-            self._good = (frame, tuple(int(v) for v in bbox))
+            x, y, w, h = (int(v) for v in bbox)
+            self._good = (frame, (x, y, w, h))
+            cx, cy, cw, ch = self._centre((x, y, w, h))
+            self._tmpl = self._grey(frame[cy:cy + ch, cx:cx + cw])
         return ok
 
     def update(self, frame):
         self._acc += self._shift(frame)
         self._off = tuple(int(round(v)) for v in self._acc)
         view = self._stabilise(frame)
+
+        if self._fails:
+            found = self._search(frame)
+            if found is not None:
+                self._fails = 0
+                self._rebase(frame, found)
+                self.inner.init(frame, found)
+                return True, found, None
 
         if self._fails and not self.graded:
             # Corner bug: never update a CSRT whose last update failed.
@@ -324,10 +454,13 @@ class StabilizedTracker:
         if not ok or rect is None:
             self._fails += 1
             return False, None, score
-        self._fails = 0
-
         x, y, w, h = (int(v) for v in rect)
         real = (x + self._off[0], y + self._off[1], w, h)
+        if self._match(frame, real) < self.VERIFY_MIN:
+            self._fails += 1
+            return False, None, score
+        self._fails = 0
+
         # Re-base only when it is the offset that put the box near the edge.
         # A target genuinely at the edge of the real frame gains nothing from
         # it, and would pay a re-init every frame.
