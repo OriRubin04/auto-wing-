@@ -203,8 +203,8 @@ Both halves failed measurement:
 
 **No tracker here has a usable lost-lock signal.** The fallback therefore fires
 on consecutive `update()` failures, the mechanism already in place; the score
-only derates confidence and goes in the log. Recovery belongs to
-`SaliencyDetector` re-acquisition.
+only derates confidence and goes in the log. Lost lock is caught by checking
+the box against what was selected, not by the tracker (see "Wandering" below).
 
 Most accurate measured at 8–20 px was **TrackerNano** (2.5–3.7 px, 89–100% lock,
 0/10 losses at 20 px) at ~0.2× CSRT's cost. Not adopted yet: that ratio is x86,
@@ -272,6 +272,38 @@ frames; new code holds 5 and loses the sixth (heavy blur) 100 frames later.
 `MIN_RESPONSE = 0.2` is calibrated against LK flow on that clip. Cost on the
 Pi: +5.4 ms median per update for the first version, against a tracking loop
 that already ran at 33.6 ms. Tests: `python -m unittest discover tests`.
+
+### Wandering: the second real-footage finding
+
+Second Pi run (handheld, 6 selections, labelled frame by frame by agents).
+The stabiliser helped, but after a jump it could not measure (rotation, heavy
+blur, 96-364 px) CSRT lost the target and kept reporting success on blank
+ceiling, a neighbouring lamp, or off the frame. Worse, after 20 failed frames
+the detector re-initialised on the nearest salient blob and reported a clean
+lock on a table, a vase, a shirt. Now:
+
+- **Check every box.** `StabilizedTracker` compares the centre half of the
+  box with a reference patch (NCC within half a box); below 0.7 the update is
+  a failure. Centre only, because with `INIT_BOX_MIN` the ground under a
+  vehicle fills the rest and changes as it drives.
+- **The reference follows slow change.** Frozen at selection, a vehicle that
+  turned ~8° no longer matched and was lost for good - caught in review,
+  `TurningVehicle` test. Clear matches (≥0.8) blend 10% into it.
+- **Re-acquire by appearance, against the selection.** During a loss the
+  patch taken at selection (never blended) is searched within 320 px,
+  coarse-to-fine, and only a unique match counts. Using the blended reference
+  here let a drifted one "find" a leaf.
+- **The nearest-blob re-acquisition in the detector is gone.**
+
+Replayed against the labels (run 2, selections 2-5): wrong-lock frames
+310 → 6, on target 938 → 1148, "lost" while in view 4 → 80. Run 1: 34 → 17.
+Pi 5: +1 ms per locked frame; the search is 3.2 ms median, 8.3 ms p95 (cost
+follows the area searched, ~22 ms at full resolution, hence coarse first).
+
+Open, deliberately: the search only runs during the 20-frame coast, so a
+target out of view for longer still needs a re-click. And every threshold
+here is from indoor handheld footage - recalibrate on a vehicle from altitude
+before trusting them in flight.
 
 ## 9. Verify before asserting
 

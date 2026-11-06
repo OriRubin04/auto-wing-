@@ -30,8 +30,9 @@ wrong than when right).
 
 So the fallback is NOT score-driven.  It fires on consecutive update()
 failures, the mechanism that was already there, and the score only derates
-confidence and goes into the log.  Lost-lock recovery belongs to
-SaliencyDetector re-acquisition, not to any tracker's self-report.
+confidence and goes into the log.  Lost lock is caught, and the target
+re-acquired, by StabilizedTracker checking the box against what was selected
+- not by any tracker's self-report.
 
 Interface (deliberately the same shape OpenCV already uses, so the detector
 does not care which one it holds):
@@ -260,20 +261,31 @@ class StabilizedTracker:
     # of 1-3, nearly all on a ~12 px spot) - each costs one frame of coasting.
     VERIFY_MIN = 0.7
 
-    # Re-acquisition after a loss: the same centre patch is searched for
-    # within SEARCH_RADIUS px of where the last good box should now be.  The
-    # jumps that broke the lock on the second run were 96-364 px.  Accepting a
-    # match anywhere in that area needs a higher bar than checking one box,
-    # and the match must be unique: no second place within UNIQUE_MARGIN of
-    # it.  A row of identical lamps, or a dark-over-light edge that a black
-    # shirt over a chair repeats, is a guess, not a find.
+    # The reference the check uses is not frozen at selection: a vehicle that
+    # turned ~8 degrees no longer matched it, and was lost for good (found in
+    # review; TurningVehicle test).  Each frame that matches at REFRESH_MIN
+    # or better blends REFRESH_RATE of what it saw into the reference.  An
+    # abrupt jump onto something else scores low and is never blended in.
+    REFRESH_MIN = 0.8
+    REFRESH_RATE = 0.1
+
+    # Re-acquisition after a loss: the patch taken AT SELECTION (the anchor,
+    # never blended) is searched for within SEARCH_RADIUS px of where the last
+    # good box should now be.  The jumps that broke the lock on the second
+    # run were 96-364 px.  Accepting a match anywhere in that area needs a
+    # higher bar than checking one box, and the match must be unique: no
+    # second place within UNIQUE_MARGIN of it.  A row of identical lamps, or a
+    # dark-over-light edge that a black shirt over a chair repeats, is a
+    # guess, not a find.  The anchor rather than the blended reference
+    # because a reference that drifted during a wander then "found" leaves.
     #
     # Replayed against the labels, previous code -> this (with the detector's
     # nearest-blob re-acquisition removed): run 2, selections 2-5, frames
-    # locked on the wrong thing 310 -> 0, on target 938 -> 1040, "lost" while
-    # the target was in view 4 -> 192 (honest, but not yet found again).
-    # Run 1: wrong-lock frames 34 -> 10, on target unchanged.  Selection 1 of
-    # run 2 is left out: its labels are marginal (box beside the puck).
+    # locked on the wrong thing 310 -> 6, on target 938 -> 1148, "lost" while
+    # the target was in view 4 -> 80.  Run 1: wrong-lock frames 34 -> 17, on
+    # target unchanged.  Selection 1 of run 2 is left out: its labels are
+    # marginal (box beside the puck).  Both runs are indoor and handheld;
+    # nothing here is calibrated on a vehicle seen from altitude yet.
     SEARCH_RADIUS = 320
     FOUND_MIN = 0.85
     UNIQUE_MARGIN = 0.1
@@ -360,8 +372,18 @@ class StabilizedTracker:
         t = self._tmpl
         if t.shape != (h, w):
             t = cv2.resize(t, (w, h), interpolation=cv2.INTER_AREA)
-        return float(cv2.matchTemplate(self._grey(frame[ya:yb, xa:xb]), t,
-                                       cv2.TM_CCOEFF_NORMED).max())
+        win = self._grey(frame[ya:yb, xa:xb])
+        _, best, _, (bx, by) = cv2.minMaxLoc(cv2.matchTemplate(win, t, cv2.TM_CCOEFF_NORMED))
+        if best >= self.REFRESH_MIN:
+            # Follow slow changes of look (a turning vehicle, range, light)
+            # while the match is clear.  An abrupt jump onto something else
+            # scores low and is never blended in.
+            seen = win[by:by + h, bx:bx + w]
+            if seen.shape != self._tmpl.shape:
+                seen = cv2.resize(seen, self._tmpl.shape[::-1], interpolation=cv2.INTER_AREA)
+            self._tmpl = cv2.addWeighted(self._tmpl, 1.0 - self.REFRESH_RATE,
+                                         seen, self.REFRESH_RATE, 0.0)
+        return float(best)
 
     def _search(self, frame):
         """After a loss: look for the selected centre around where the last
@@ -371,7 +393,7 @@ class StabilizedTracker:
         gx, gy, w, h = self._good[1]
         # Where the last good box's centre should be now, in real coordinates.
         px, py = gx + self._off[0] + w // 2, gy + self._off[1] + h // 2
-        t = self._tmpl
+        t = self._anchor
         th, tw = t.shape
         r = self.SEARCH_RADIUS
         fh, fw = frame.shape[:2]
@@ -389,12 +411,9 @@ class StabilizedTracker:
         # search give up (uniqueness), never accept: FOUND_MIN is checked at
         # full resolution below.
         s = min(0.5, self.COARSE_PX / float(min(tw, th)))
-        if s < 1.0:
-            ws = cv2.resize(win, None, fx=s, fy=s, interpolation=cv2.INTER_AREA)
-            ts = cv2.resize(t, (max(4, int(round(tw * s))), max(4, int(round(th * s)))),
-                            interpolation=cv2.INTER_AREA)
-        else:
-            ws, ts = win, t
+        ws = cv2.resize(win, None, fx=s, fy=s, interpolation=cv2.INTER_AREA)
+        ts = cv2.resize(t, (max(4, int(round(tw * s))), max(4, int(round(th * s)))),
+                        interpolation=cv2.INTER_AREA)
         if ws.shape[0] < ts.shape[0] or ws.shape[1] < ts.shape[1]:
             return None
         res = cv2.matchTemplate(ws, ts, cv2.TM_CCOEFF_NORMED)
@@ -426,7 +445,7 @@ class StabilizedTracker:
             x, y, w, h = (int(v) for v in bbox)
             self._good = (frame, (x, y, w, h))
             cx, cy, cw, ch = self._centre((x, y, w, h))
-            self._tmpl = self._grey(frame[cy:cy + ch, cx:cx + cw])
+            self._tmpl = self._anchor = self._grey(frame[cy:cy + ch, cx:cx + cw])
         return ok
 
     def update(self, frame):
@@ -436,10 +455,9 @@ class StabilizedTracker:
 
         if self._fails:
             found = self._search(frame)
-            if found is not None:
+            if found is not None and self.inner.init(frame, found):
                 self._fails = 0
                 self._rebase(frame, found)
-                self.inner.init(frame, found)
                 return True, found, None
 
         if self._fails and not self.graded:

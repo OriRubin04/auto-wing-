@@ -372,10 +372,3 @@ class ObjectDetector:
         self.last_score = None     # pixels report none; confidence goes back to coasting
         logger.warning(f"Primary tracker lost lock — handed over to {self._tracker.name}")
         return True
-
-    @staticmethod
-    def _bbox_center(bbox):
-        if bbox is None:
-            return 0, 0
-        x, y, w, h = bbox
-        return x + w // 2, y + h // 2

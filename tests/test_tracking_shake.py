@@ -116,6 +116,45 @@ class FollowedVehicle(unittest.TestCase):
                             f"frame {i}: box at ({cx:.0f},{cy:.0f})")
 
 
+class TurningVehicle(unittest.TestCase):
+    # Found in review: the lost-lock check compared every frame with the
+    # patch taken at selection, so a vehicle that turned ~8 degrees no longer
+    # matched it - and a backoff re-init then locked onto the ground.  Roads
+    # turn and the aircraft orbits, so the target's look changes all the time.
+
+    def test_holds_a_vehicle_through_a_slow_turn(self):
+        rng = np.random.default_rng(1)
+        coarse = rng.integers(70, 190, size=(125, 375), dtype=np.uint8)
+        world = cv2.resize(coarse, (3000, 1000), interpolation=cv2.INTER_CUBIC)
+        world = cv2.cvtColor(cv2.GaussianBlur(world, (0, 0), 2), cv2.COLOR_GRAY2BGR)
+
+        def frame(i, x):
+            f = world[500 - FH // 2:500 + FH // 2, x - FW // 2:x + FW // 2].copy()
+            ang = 0.6 * i                                  # 18 deg/s at 30 fps
+            body = cv2.boxPoints(((FW // 2, FH // 2), (16, 8), ang)).astype(np.int32)
+            cv2.fillPoly(f, [body], (25, 25, 25))
+            fx = FW // 2 + np.cos(np.radians(ang)) * 4.8
+            fy = FH // 2 + np.sin(np.radians(ang)) * 4.8
+            cab = cv2.boxPoints(((fx, fy), (4.8, 6.4), ang)).astype(np.int32)
+            cv2.fillPoly(f, [cab], (230, 230, 230))
+            return f
+
+        x = 700
+        tracker, _ = make_tracker({})
+        self.assertTrue(tracker.init(frame(0, x), (FW // 2 - 12, FH // 2 - 12, 25, 25)))
+        held = 0
+        for i in range(1, 201):                            # 120 degrees
+            x += 6
+            ok, rect, _ = tracker.update(frame(i, x))
+            if ok:
+                cx, cy = _centre(rect)
+                self.assertLess(np.hypot(cx - FW // 2, cy - FH // 2), 6.0,
+                                f"frame {i} ({0.6 * i:.0f} deg): lock on "
+                                f"({cx:.0f},{cy:.0f}), vehicle at the centre")
+                held += 1
+        self.assertGreater(held, 190, f"held only {held} of 200 frames")
+
+
 class FailedUpdate(unittest.TestCase):
 
     def test_a_blank_frame_in_the_middle_of_a_jump_does_not_lose_the_jump(self):
