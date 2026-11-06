@@ -238,6 +238,28 @@ shutter, JPEG artefacts, haze, parallax or real vehicle signature. It is enough
 to rule things out, not enough to pick a flight configuration. Real footage
 through `tools/benchmark_detector.py` is still the gate.
 
+### Camera shake: the first real-footage finding
+
+The first Pi run (handheld, 1280x720, 13 selections) lost lock 6 times, and
+the cause was not the tracker's appearance model. Two things, both measured:
+
+- **The picture jumps further than CSRT can search.** For a 24 px box CSRT
+  holds ~28 px of shift between frames and loses everything past ~48 px
+  (search side is `w + 3·√(wh)`, measured range is below its ±2w maximum).
+  The losses were at 53-194 px. When the camera moves the whole image moves,
+  so `StabilizedTracker` takes the camera's shift out (phase correlation on a
+  320 px grey copy) before the inner tracker sees the frame.
+- **CSRT has a corner bug.** A failed `update()` stores (-1,-1) as the centre
+  before returning false, so the next update searches the top-left corner and
+  usually reports ok there - which also resets `fail_count`, so coasting and
+  re-acquisition never fire. The wrapper re-inits from the last good frame
+  after any failure.
+
+Replayed on the same clip: old code reproduces all 6 live losses at the same
+frames; new code holds 5 and loses the sixth (heavy blur) 100 frames later.
+`MIN_RESPONSE = 0.2` is calibrated against LK flow on that clip. Tests:
+`python -m unittest discover tests`.
+
 ## 9. Verify before asserting
 
 **Operator's standing instruction: research and check before giving an answer,
