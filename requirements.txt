@@ -1,5 +1,13 @@
 pymavlink>=2.4.40
-opencv-python>=4.8.0
+# pymavlink imports `serial` only when the connection is a serial port, and does
+# not declare it.  SITL runs over TCP, so this was invisible until the Pi.
+pyserial>=3.5
+# >=4.9.0 for cv2.TrackerVit (opt-in backend).  On an older build the
+# onboard software logs the miss and tracks on CSRT instead of failing.
+opencv-contrib-python>=4.9.0
 numpy>=1.24.0
-ultralytics>=8.0.0
 pyyaml>=6.0
+
+# Optional: only needed if you set detection.backend: "yolo" in config.yaml.
+# Pulls in PyTorch (~2 GB) and is not required for the default saliency backend.
+# ultralytics>=8.0.0
