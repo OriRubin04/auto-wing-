@@ -322,6 +322,14 @@ Replayed against the labels (run 2, selections 2-5): wrong-lock frames
 Pi 5: +1 ms per locked frame; the search is 3.2 ms median, 8.3 ms p95 (cost
 follows the area searched, ~22 ms at full resolution, hence coarse first).
 
+Flat targets (fourth Pi run, windows on a facade): the centre of a window
+is dark glass, centre std 9-13 grey levels, and NCC there is noise against
+noise - 0.2-0.5 on the next frame while CSRT held the window, so every
+window was declared lost at once. Below `TEXTURE_MIN = 20` the whole box is
+the reference instead (0.83-0.90 there). Replayed: windows 1 frame -> held
+until the next click; labelled runs 1 and 2 unchanged or better (run 2 false
+lock 11 -> 3, 11 fewer hits).
+
 Open, deliberately: the search only runs during the 20-frame coast, so a
 target out of view for longer still needs a re-click. And every threshold
 here is from indoor handheld footage - recalibrate on a vehicle from altitude

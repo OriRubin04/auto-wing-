@@ -59,5 +59,39 @@ class InitBoxCoversTheObject(unittest.TestCase):
         self.assertEqual(det.last_bbox[2:], (24, 24))
 
 
+def _facade(seed):
+    """Light wall, dark windows with a pale frame; the glass is flat but for
+    sensor noise - the inside of a window carries no texture of its own."""
+    rng = np.random.default_rng(seed)
+    img = np.full((FH, FW), 175, np.uint8)
+    for y in range(60, FH - 60, 110):
+        for x in range(60, FW - 60, 120):
+            cv2.rectangle(img, (x, y), (x + 34, y + 40), 235, -1)
+            cv2.rectangle(img, (x + 4, y + 4), (x + 30, y + 36), 70, -1)
+    return img, rng
+
+
+def _noisy(img, rng):
+    n = rng.normal(0, 6, img.shape)
+    return cv2.cvtColor(np.clip(img + n, 0, 255).astype(np.uint8), cv2.COLOR_GRAY2BGR)
+
+
+class FlatTargetsHoldLock(unittest.TestCase):
+
+    def test_holds_a_window_on_a_still_facade(self):
+        # Fourth Pi run: every window lost lock on the first update.  CSRT
+        # held it; the centre of the box is flat glass, so the check that
+        # the box is still on target compared noise with noise (NCC ~0.3).
+        img, rng = _facade(0)
+        det = ObjectDetector({})
+        x, y = 60 + 4 * 120, 60 + 2 * 110
+        self.assertTrue(det.select_target(x + 17, y + 20, _noisy(img, rng)))
+        locked = 0
+        for _ in range(30):
+            det.process(_noisy(img, rng))
+            locked += det.state == det.STATE_TRACKING and det.fail_count == 0
+        self.assertGreaterEqual(locked, 28, f"held the window on {locked} of 30 still frames")
+
+
 if __name__ == '__main__':
     unittest.main()

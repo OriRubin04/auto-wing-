@@ -261,6 +261,15 @@ class StabilizedTracker:
     # of 1-3, nearly all on a ~12 px spot) - each costs one frame of coasting.
     VERIFY_MIN = 0.7
 
+    # ...unless the centre is flat.  NCC of a patch with no texture is noise
+    # against noise: on the fourth Pi run every window on a facade (dark
+    # glass, centre std 9-13 grey levels) scored 0.2-0.5 on the very next
+    # frame while CSRT held it, and was declared lost each time.  The whole
+    # box scored 0.83-0.90 there.  Below TEXTURE_MIN the whole box is the
+    # reference.  Cars on that run had centre std 35-70, so the calibrated
+    # path above is unchanged for them.
+    TEXTURE_MIN = 20.0
+
     # The reference the check uses is not frozen at selection: a vehicle that
     # turned ~8 degrees no longer matched it, and was lost for good (found in
     # review; TurningVehicle test).  Each frame that matches at REFRESH_MIN
@@ -353,9 +362,11 @@ class StabilizedTracker:
     def _grey(img):
         return np.float32(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img)
 
-    @staticmethod
-    def _centre(box):
-        """The centre half of a box, (x, y, w, h)."""
+    def _centre(self, box):
+        """The part of a box the check compares: the centre half, or the
+        whole box when the target's centre is flat (TEXTURE_MIN)."""
+        if getattr(self, '_whole', False):
+            return tuple(box)
         x, y, w, h = box
         cw, ch = max(4, w // 2), max(4, h // 2)
         return x + (w - cw) // 2, y + (h - ch) // 2, cw, ch
@@ -444,6 +455,9 @@ class StabilizedTracker:
         if ok:
             x, y, w, h = (int(v) for v in bbox)
             self._good = (frame, (x, y, w, h))
+            self._whole = False
+            cx, cy, cw, ch = self._centre((x, y, w, h))
+            self._whole = float(self._grey(frame[cy:cy + ch, cx:cx + cw]).std()) < self.TEXTURE_MIN
             cx, cy, cw, ch = self._centre((x, y, w, h))
             self._tmpl = self._anchor = self._grey(frame[cy:cy + ch, cx:cx + cw])
         return ok
