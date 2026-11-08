@@ -383,6 +383,14 @@ and an extra flight-critical connector.
   `CAP_DSHOW` is the correct backend for now. MJPEG fourcc is still required
   the moment resolution exceeds 640×480 — uncompressed 720p exceeds USB 2.0
   bandwidth and the driver silently drops to ~5 fps rather than erroring.
+- Camera frame rate (sixth Pi run, USB global-shutter camera): one capture
+  buffer made V4L2 skip every other frame (15 fps); two give 30. And a
+  camera's own auto-exposure lengthens exposure in the dark until the frame
+  rate falls (2.5 fps measured). `onboard/exposure.py` sets exposure itself,
+  gain first and never past 90% of the frame period, with ranges read from
+  whatever camera is plugged in; a camera without manual exposure keeps its
+  own. Linux only. Measured after: 29.8 fps, worst gap 65 ms, in the same
+  room. Not yet checked outdoors or in real darkness.
 - Pi deployment (install, wiring to the flight controller, FC parameters,
   bench-test order) is written up in `docs/raspberry-pi-setup.md`, and
   `tools/install_pi.sh` is the one-command setup. Nothing there has been run on
