@@ -21,7 +21,6 @@ from onboard.controller import TrackingController
 from onboard.mavlink_interface import MAVLinkInterface
 from onboard.streamer import VideoStreamer, ControlServer
 from onboard.flight_log import FlightLogger
-from onboard.exposure import ExposureControl
 
 
 def load_config(path='config/config.yaml'):
@@ -45,10 +44,6 @@ class TrackingSystem:
         # against these) would silently reference different centres.
         self.frame_h, self.frame_w = first_frame.shape[:2]
         logger.info(f"Camera opened: index={cam_index} resolution={self.frame_w}x{self.frame_h}")
-        # The camera's own auto-exposure drops the frame rate in the dark
-        # (2.5 fps measured); this keeps it at full rate on any V4L2 camera.
-        self.exposure = (ExposureControl(cam_index, cam_cfg.get('fps', 30))
-                         if sys.platform.startswith('linux') else None)
 
         self.detector = ObjectDetector(cfg['detection'])
         self.controller = TrackingController(cfg['control'])
@@ -151,8 +146,6 @@ class TrackingSystem:
                         self.cap, _ = self._open_camera(
                             self.cfg['camera']['index'], self.cfg['camera'])
                         cam_fail_count = 0
-                        if self.exposure:
-                            self.exposure.reset()
                         logger.info("Camera reopened successfully")
                     except RuntimeError as e:
                         logger.error(str(e))
@@ -161,8 +154,6 @@ class TrackingSystem:
                 continue
             cam_fail_count = 0
             loop_t0 = time.time()
-            if self.exposure:
-                self.exposure.feed(frame)
 
             # Single MAVLink drain: refreshes the attitude cache and services
             # any outstanding mode request without ever blocking the loop.
